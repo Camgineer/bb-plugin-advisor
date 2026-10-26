@@ -58,16 +58,9 @@ const MAX_PENDING_ADVICE_PER_TURN = 20;
 /** Per-thread cap so a persistently failing advisor cannot grow the table forever. */
 const MAX_INCIDENTS_PER_THREAD = 50;
 
-const reasoningLevelSchema = z.enum([
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "ultracode",
-  "max",
-  "ultra",
-]);
+// Provider catalogs report reasoning efforts as open strings, so a level a
+// newer provider adds must round-trip rather than fail the contract.
+const reasoningLevelSchema = z.string().min(1);
 const savedReasoningLevelSchema = z.union([
   z.literal("default"),
   reasoningLevelSchema,

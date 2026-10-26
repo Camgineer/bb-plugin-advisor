@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/salemsayed/bb-plugin-advisor/actions/workflows/ci.yml/badge.svg)](https://github.com/salemsayed/bb-plugin-advisor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![bb ≥ 0.40](https://img.shields.io/badge/bb-%E2%89%A5%200.40-8b5cf6.svg)](#install)
+[![bb ≥ 0.47.1](https://img.shields.io/badge/bb-%E2%89%A5%200.47.1-8b5cf6.svg)](#install)
 
 <p align="center">
   <img src="./docs/media/advisor-hero.svg" alt="Advisor — an independent reviewer on every coding thread" width="100%" />
@@ -81,7 +81,7 @@ Advice older than 24 hours is retired rather than sent stale.
 
 ## Install
 
-Requires bb ≥ 0.40 and plugin SDK ≥ 0.4.21.
+Requires bb ≥ 0.47.1 and plugin SDK ≥ 0.6.79. Older bb releases keep Advisor 0.1.4.
 
 From GitHub:
 
@@ -331,7 +331,7 @@ still be assessed by that provider.
 ## Development
 
 Requires Node 22.19 or later in the Node 22 series. The build uses the locked
-BB 0.43.1 builder and SDK 0.4.87, independently of the desktop BB version.
+BB 0.47.1 builder and SDK 0.6.79, independently of the desktop BB version.
 
 ```sh
 npm ci

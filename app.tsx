@@ -11,9 +11,9 @@ import {
   ThreadChat,
 } from "@get-bb/plugin-sdk/app";
 import type {
+  ExperimentalThreadActionTabProps,
   PluginRpcResult,
   PluginThreadHeaderActionProps,
-  PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type { ModelConfiguration, rpcContract } from "./server";
 
@@ -1092,7 +1092,7 @@ function IncidentRow({
   );
 }
 
-function AdvisorPanel({ threadId }: PluginThreadPanelProps) {
+function AdvisorPanel({ threadId }: ExperimentalThreadActionTabProps) {
   const rpc = useRpc<Contract>();
   const { data, error, reload } = useThreadAdvisor<"threadReviews">(
     threadId,
@@ -1548,7 +1548,10 @@ export default definePluginApp((app) => {
     component: AdvisorModelSettings,
   });
 
-  app.slots.threadPanelAction({
+  // Keeping the retired threadPanelAction id preserves users' saved tabs.
+  app.slots.experimental_tab({
+    context: { kind: "thread" },
+    availability: "action",
     id: PANEL_ACTION_ID,
     title: "Advisor",
     icon: "ShieldCheck",
