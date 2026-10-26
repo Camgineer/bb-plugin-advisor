@@ -2900,13 +2900,18 @@ END_ADVISOR_RESULT`);
           model: "gpt-advisor",
           displayName: "GPT Advisor",
           isDefault: true,
-          supportedReasoningEfforts: [{ reasoningEffort: "hyper" }],
+          supportedReasoningEfforts: [
+            { reasoningEffort: "hyper" },
+            { reasoningEffort: "default" },
+          ],
           defaultReasoningEffort: "hyper",
         },
       ],
       modelLoadError: null,
     }));
 
+    // A literal "default" level would collide with the saved model-default
+    // sentinel, so only the unambiguous level is offered.
     expect(await harness.callRpc("modelConfiguration", null)).toMatchObject({
       hosts: [{
         options: [{ supportedReasoningLevels: ["hyper"], defaultReasoningLevel: "hyper" }],
