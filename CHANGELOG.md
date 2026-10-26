@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+- Build with BB 0.47.1 and plugin SDK 0.6.79. The Advisor panel now registers as a thread tab through `experimental_tab`, because BB removed the old thread panel slot. The tab keeps its id, so panels users already opened still restore.
+- Accept any reasoning level a provider's model catalog reports. Catalogs now report reasoning as plain strings, and Advisor no longer rejects a level it does not know. A level literally named `default` is not offered, because **Model default** already uses that value.
+- Mark the reviewer's provider, model, permission mode and reasoning level as explicit when spawning it, so `message.dispatch` hooks see them as deliberate choices, not core defaults. Thanks to @JackALaing (#13).
+
+Requires BB 0.47.1 or later and plugin SDK 0.6.79 or later. Older BB releases cannot load this version and stay on 0.1.4.
+
 ## 0.1.4
 
 - Deliver late findings as an agent-only Advisor message when the next turn starts. A running agent session ignores changed instructions, so findings used to be marked sent without reaching the agent.

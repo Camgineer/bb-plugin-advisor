@@ -58,16 +58,15 @@ const MAX_PENDING_ADVICE_PER_TURN = 20;
 /** Per-thread cap so a persistently failing advisor cannot grow the table forever. */
 const MAX_INCIDENTS_PER_THREAD = 50;
 
-const reasoningLevelSchema = z.enum([
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "ultracode",
-  "max",
-  "ultra",
-]);
+// Provider catalogs report reasoning efforts as open strings, so a level a
+// newer provider adds must round-trip rather than fail the contract.
+const catalogReasoningLevelSchema = z.string().min(1);
+// A saved "default" means the model's own default. A catalog level with that
+// literal name would be indistinguishable from it, so it is never offered.
+const reasoningLevelSchema = catalogReasoningLevelSchema.refine(
+  (level) => level !== "default",
+  { message: '"default" selects the model default, not an explicit level' },
+);
 const savedReasoningLevelSchema = z.union([
   z.literal("default"),
   reasoningLevelSchema,
@@ -90,7 +89,7 @@ const modelOptionSchema = modelIdentitySchema.extend({
   modelName: z.string(),
   isDefault: z.boolean(),
   supportedReasoningLevels: z.array(reasoningLevelSchema),
-  defaultReasoningLevel: reasoningLevelSchema,
+  defaultReasoningLevel: catalogReasoningLevelSchema,
 });
 
 const hostModelConfigurationSchema = z.object({
@@ -1215,9 +1214,9 @@ export default async function plugin(bb: BbPluginApi) {
               model: model.model,
               modelName: model.displayName || model.model,
               isDefault: model.isDefault,
-              supportedReasoningLevels: model.supportedReasoningEfforts.map(
-                (effort) => effort.reasoningEffort,
-              ),
+              supportedReasoningLevels: model.supportedReasoningEfforts
+                .map((effort) => effort.reasoningEffort)
+                .filter((level) => level !== "default"),
               defaultReasoningLevel: model.defaultReasoningEffort,
             })),
           };
@@ -2151,6 +2150,14 @@ export default async function plugin(bb: BbPluginApi) {
           providerId,
           model,
           ...(reasoningLevel ? { reasoningLevel } : {}),
+          // Without per-field sources, message.dispatch hooks see each value
+          // as a core default rather than the reviewer Advisor selected.
+          executionInputSources: {
+            providerId: "explicit",
+            model: "explicit",
+            permissionMode: "explicit",
+            ...(reasoningLevel ? { reasoningLevel: "explicit" as const } : {}),
+          },
           // The host validates this. When the catalog was unreadable the
           // candidate may be a mode this bb build's types do not know, which is
           // exactly the boundary a cast belongs at: a refusal falls through to

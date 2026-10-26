@@ -18,7 +18,13 @@ function q(slot: { container: HTMLElement }) {
 }
 
 const badgeSlot = app.threadHeaderActions[0]!;
-const panelSlot = app.threadPanelActions[0]!;
+const panelTab = app.tabs.find((tab) => tab.id === "reviews")!;
+// TS cannot narrow the tab union on its nested `context.kind`; the
+// registration test below checks the shape this assumes.
+const panelSlot = panelTab as Extract<
+  typeof panelTab,
+  { context: { kind: "thread" }; availability: "action" }
+>;
 const badgeProps = {
   threadId: "t1",
   projectId: "p1",
@@ -324,11 +330,9 @@ describe("advisor thread switch", () => {
     const slot = renderSlot(toggleSlot, {}, {
       composer: {
         scope: {
-          kind: "side-chat",
-          projectId: "p1",
-          parentThreadId: "t1",
-          tabId: "tab1",
-          childThreadId: null,
+          kind: "queued-message",
+          threadId: "t1",
+          queuedMessageId: "q1",
         } as const,
       },
       rpc: {
@@ -418,6 +422,16 @@ describe("advisor header badge", () => {
 });
 
 describe("advisor panel", () => {
+  it("registers as a thread action tab under the id its openers target", () => {
+    expect(app.tabs).toHaveLength(1);
+    expect(panelTab).toMatchObject({
+      id: "reviews",
+      context: { kind: "thread" },
+      availability: "action",
+      layout: "flush",
+    });
+  });
+
   it("counts open findings without counting clean turns", async () => {
     const slot = renderSlot(panelSlot, { threadId: "t1", params: null }, {
       rpc: {

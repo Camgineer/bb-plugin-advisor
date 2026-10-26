@@ -2764,6 +2764,12 @@ END_ADVISOR_RESULT`);
         model: "gpt-advisor",
         reasoningLevel: "xhigh",
         environment: { type: "reuse", environmentId: "environment-test" },
+        executionInputSources: {
+          providerId: "explicit",
+          model: "explicit",
+          permissionMode: "explicit",
+          reasoningLevel: "explicit",
+        },
       }),
     );
 
@@ -2788,7 +2794,146 @@ END_ADVISOR_RESULT`);
         providerId: "codex",
         model: "gpt-advisor",
         reasoningLevel: "high",
+        executionInputSources: expect.objectContaining({
+          reasoningLevel: "explicit",
+        }),
       }),
+    );
+  });
+
+  it("marks the catalog default it resolved for a saved default reasoning level as explicit", async () => {
+    const { harness, spawn } = await loadAdvisor(`ADVISOR_RESULT
+severity: pass
+summary: Looks correct
+details:
+none
+END_ADVISOR_RESULT`);
+    harness.sdk.stub("providers.list", async () => [
+      {
+        id: "codex",
+        displayName: "Codex",
+        available: true,
+        capabilities: { permissionModes: ["accept-edits"] },
+      },
+    ]);
+    harness.sdk.stub("providers.models", async () => ({
+      providers: [
+        {
+          id: "codex",
+          displayName: "Codex",
+          available: true,
+          capabilities: { permissionModes: ["accept-edits"] },
+        },
+      ],
+      models: [
+        {
+          model: "gpt-advisor",
+          displayName: "GPT Advisor",
+          isDefault: true,
+          supportedReasoningEfforts: [
+            { reasoningEffort: "medium" },
+            { reasoningEffort: "xhigh" },
+          ],
+          defaultReasoningEffort: "xhigh",
+        },
+      ],
+      modelLoadError: null,
+    }));
+
+    await harness.callRpc("setHostModel", {
+      hostId: "host-test",
+      selection: {
+        providerId: "codex",
+        model: "gpt-advisor",
+        reasoningLevel: "default",
+      },
+    });
+    await harness.callAgentTool(
+      "advisor_review",
+      { focus: "Review with the model's default reasoning." },
+      { threadId: "thread-primary" },
+    );
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-advisor",
+        reasoningLevel: "xhigh",
+        executionInputSources: {
+          providerId: "explicit",
+          model: "explicit",
+          permissionMode: "explicit",
+          reasoningLevel: "explicit",
+        },
+      }),
+    );
+  });
+
+  it("passes a reasoning level newer than this plugin through from the catalog", async () => {
+    const { harness, spawn } = await loadAdvisor(`ADVISOR_RESULT
+severity: pass
+summary: Looks correct
+details:
+none
+END_ADVISOR_RESULT`);
+    harness.sdk.stub("hosts.list", async () => [
+      { id: "host-test", name: "Laptop", status: "connected" },
+    ]);
+    harness.sdk.stub("providers.list", async () => [
+      {
+        id: "codex",
+        displayName: "Codex",
+        available: true,
+        capabilities: { permissionModes: ["accept-edits"] },
+      },
+    ]);
+    harness.sdk.stub("providers.models", async () => ({
+      providers: [
+        {
+          id: "codex",
+          displayName: "Codex",
+          available: true,
+          capabilities: { permissionModes: ["accept-edits"] },
+        },
+      ],
+      models: [
+        {
+          model: "gpt-advisor",
+          displayName: "GPT Advisor",
+          isDefault: true,
+          supportedReasoningEfforts: [
+            { reasoningEffort: "hyper" },
+            { reasoningEffort: "default" },
+          ],
+          defaultReasoningEffort: "hyper",
+        },
+      ],
+      modelLoadError: null,
+    }));
+
+    // A literal "default" level would collide with the saved model-default
+    // sentinel, so only the unambiguous level is offered.
+    expect(await harness.callRpc("modelConfiguration", null)).toMatchObject({
+      hosts: [{
+        options: [{ supportedReasoningLevels: ["hyper"], defaultReasoningLevel: "hyper" }],
+        error: null,
+      }],
+    });
+    await harness.callRpc("setHostModel", {
+      hostId: "host-test",
+      selection: {
+        providerId: "codex",
+        model: "gpt-advisor",
+        reasoningLevel: "hyper",
+      },
+    });
+    await harness.callAgentTool(
+      "advisor_review",
+      { focus: "Review with a new reasoning level." },
+      { threadId: "thread-primary" },
+    );
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoningLevel: "hyper" }),
     );
   });
 
@@ -2974,8 +3119,42 @@ END_ADVISOR_RESULT`);
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: "codex", model: "gpt-5.6" }),
     );
-    expect(harness.sdk.callsTo("threads.spawn")[0]?.[0]).not.toHaveProperty(
-      "reasoningLevel",
+    const request = harness.sdk.callsTo("threads.spawn")[0]?.[0];
+    expect(request).not.toHaveProperty("reasoningLevel");
+    expect(request).toHaveProperty("executionInputSources", {
+      providerId: "explicit",
+      model: "explicit",
+      permissionMode: "explicit",
+    });
+  });
+
+  it("marks a configured fallback reasoning level as explicit", async () => {
+    const { spawn, harness } = await loadAdvisor(
+      `ADVISOR_RESULT
+severity: pass
+summary: Looks correct
+details:
+none
+END_ADVISOR_RESULT`,
+      { advisorReasoning: "xhigh" },
+    );
+    await harness.callAgentTool(
+      "advisor_review",
+      { focus: "Review on the primary model." },
+      { threadId: "thread-primary" },
+    );
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-5.6",
+        reasoningLevel: "xhigh",
+        executionInputSources: {
+          providerId: "explicit",
+          model: "explicit",
+          permissionMode: "explicit",
+          reasoningLevel: "explicit",
+        },
+      }),
     );
   });
 });
