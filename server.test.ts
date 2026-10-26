@@ -2764,6 +2764,12 @@ END_ADVISOR_RESULT`);
         model: "gpt-advisor",
         reasoningLevel: "xhigh",
         environment: { type: "reuse", environmentId: "environment-test" },
+        executionInputSources: {
+          providerId: "explicit",
+          model: "explicit",
+          permissionMode: "explicit",
+          reasoningLevel: "explicit",
+        },
       }),
     );
 
@@ -2974,9 +2980,13 @@ END_ADVISOR_RESULT`);
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: "codex", model: "gpt-5.6" }),
     );
-    expect(harness.sdk.callsTo("threads.spawn")[0]?.[0]).not.toHaveProperty(
-      "reasoningLevel",
-    );
+    const request = harness.sdk.callsTo("threads.spawn")[0]?.[0];
+    expect(request).not.toHaveProperty("reasoningLevel");
+    expect(request).toHaveProperty("executionInputSources", {
+      providerId: "explicit",
+      model: "explicit",
+      permissionMode: "explicit",
+    });
   });
 });
 

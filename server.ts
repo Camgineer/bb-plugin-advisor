@@ -2151,6 +2151,14 @@ export default async function plugin(bb: BbPluginApi) {
           providerId,
           model,
           ...(reasoningLevel ? { reasoningLevel } : {}),
+          // Without per-field sources, message.dispatch hooks see each value
+          // as a core default rather than the reviewer Advisor selected.
+          executionInputSources: {
+            providerId: "explicit",
+            model: "explicit",
+            permissionMode: "explicit",
+            ...(reasoningLevel ? { reasoningLevel: "explicit" as const } : {}),
+          },
           // The host validates this. When the catalog was unreadable the
           // candidate may be a mode this bb build's types do not know, which is
           // exactly the boundary a cast belongs at: a refusal falls through to
