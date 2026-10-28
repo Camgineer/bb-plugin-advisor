@@ -40,7 +40,6 @@ type AdvisorPermissionMode = NonNullable<
   Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0]["permissionMode"]
 >;
 /** Advice about a turn this old is stale; it is retired instead of sent. */
-const REVIEW_EXCERPT_MAX_CHARS = 1000;
 const PENDING_ADVICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BLOCKED_REASON = "the reviewer requested permission and was stopped without granting it; the next review will use a fresh session";
 const CANCELLED_REASON =
@@ -626,6 +625,22 @@ function retryResultBlock(output: string): string | null {
   if (missingSeverity) return null;
 
   return block;
+}
+
+function ambiguousRetryFinding(output: string) {
+  const block = output.match(/^[ \t]*ADVISOR_RESULT[ \t]*\r?\n[\s\S]*?^[ \t]*END_ADVISOR_RESULT[ \t]*$/im)?.[0];
+  if (block === undefined) return null;
+
+  const severityFields = Array.from(block.matchAll(/^[ \t]*severity[ \t]*:/gim));
+  const oneFindingSeverity = severityFields.length === 1 && /^[ \t]*severity[ \t]*:[ \t]*(?:nit|concern|blocker)[ \t]*\r?$/im.test(block);
+  if (!oneFindingSeverity) return null;
+
+  const finding = parseAdvisorOutput(block);
+  if (!finding) return null;
+  finding.key = "";
+  finding.resolvedKeys = [];
+  finding.details = `The retry reply was ambiguous; its evidence and resolved findings could not be confirmed.\n\n${finding.details}`;
+  return finding;
 }
 
 function buildAdvisorPrompt(args: {
@@ -2500,10 +2515,12 @@ export default async function plugin(bb: BbPluginApi) {
     // is the case where downgrading to a pass is most harmful.
     const reviewOutput = permissionRetry ? retryResultBlock(output) : output;
     const missingReviewOutput = reviewOutput === null;
-    if (missingReviewOutput) {
-      return unavailable(`the retry did not return a complete ADVISOR_RESULT block or returned ambiguous fields; reviewer reply excerpt (first ${REVIEW_EXCERPT_MAX_CHARS} characters): ${output.trim().slice(0, REVIEW_EXCERPT_MAX_CHARS)}`);
+    const review = missingReviewOutput
+      ? ambiguousRetryFinding(output)
+      : parseAdvisorOutput(reviewOutput);
+    if (missingReviewOutput && !review) {
+      return unavailable("the retry did not return a complete ADVISOR_RESULT block or returned ambiguous fields; essential evidence could not be confirmed");
     }
-    const review = parseAdvisorOutput(reviewOutput);
     if (!review) {
       // Prose with no verdict is not a finding. Fabricating a `concern` here
       // would hand the agent work to do based on nothing.
@@ -2511,13 +2528,13 @@ export default async function plugin(bb: BbPluginApi) {
         `the reviewer's reply carried no verdict (${output.trim().slice(0, 160)})`,
       );
     }
-    if (permissionRetry) {
+    if (permissionRetry && reviewOutput !== null) {
       const evidence = reviewOutput.match(/^[ \t]*evidence[ \t]*:[ \t]*(sufficient|unavailable)[ \t]*\r?$/im)?.[1]?.toLowerCase();
       const evidenceUnconfirmed = evidence !== "sufficient";
       if (evidenceUnconfirmed) {
         const passed = review.severity === "pass";
         if (passed) {
-          return unavailable(`essential evidence could not be confirmed after a permission request (${output.trim().slice(0, REVIEW_EXCERPT_MAX_CHARS)})`);
+          return unavailable("essential evidence could not be confirmed after a permission request");
         }
         review.details = `Essential evidence could not be confirmed after a permission request.\n\n${review.details}`;
         review.resolvedKeys = [];

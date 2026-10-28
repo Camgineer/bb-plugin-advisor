@@ -1447,11 +1447,11 @@ describe("advisor session environment binding", () => {
     const result = await harness.callAgentTool("advisor_review", { focus: "Review evaluator readback." }, { threadId: "thread-primary" });
 
     expect(result).toContain("Advisor unavailable");
-    expect(result).toContain("Langfuse read unavailable");
+    expect(result).toContain("essential evidence could not be confirmed");
     expect(harness.sdk.callsTo("threads.interactions.resolve")).toHaveLength(0);
   });
 
-  it("preserves missing evidence named before the result block", async () => {
+  it("reports unconfirmed evidence without exposing preceding reviewer text", async () => {
     const { harness } = await loadAdvisor(`Langfuse read unavailable\nADVISOR_RESULT\nevidence: unavailable\nseverity: pass\nsummary: Cannot inspect evaluator\ndetails:\nnone\nEND_ADVISOR_RESULT`);
     let spawned = 0;
     harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
@@ -1460,7 +1460,7 @@ describe("advisor session environment binding", () => {
     const result = await harness.callAgentTool("advisor_review", { focus: "Review evaluator readback." }, { threadId: "thread-primary" });
 
     expect(result).toContain("Advisor unavailable");
-    expect(result).toContain("Langfuse read unavailable");
+    expect(result).toContain("essential evidence could not be confirmed");
   });
 
   it("does not approve a retry whose result block says evidence is unavailable", async () => {
@@ -1472,7 +1472,7 @@ describe("advisor session environment binding", () => {
     const result = await harness.callAgentTool("advisor_review", { focus: "Review evaluator readback." }, { threadId: "thread-primary" });
 
     expect(result).toContain("Advisor unavailable");
-    expect(result).toContain("Langfuse read unavailable");
+    expect(result).toContain("essential evidence could not be confirmed");
   });
 
   it("does not hide a supported concern behind a stray pass before the result block", async () => {
@@ -1521,19 +1521,65 @@ describe("advisor session environment binding", () => {
     expect(result).toContain("Advisor unavailable");
   });
 
-  it("surfaces a blocker in an ambiguous retry without approving it", async () => {
-    const reviewerReply = `ADVISOR_RESULT\nevidence: sufficient\nseverity: blocker\nsummary: Unapproved write found\nsummary: Check the write\ndetails:\n- The timeline shows an unapproved write.\nEND_ADVISOR_RESULT`;
+  it("keeps an ambiguous blocker after a long preamble as an open finding", async () => {
+    const reviewerReply = `${"Preamble ".repeat(150)}\nADVISOR_RESULT\nevidence: sufficient\nseverity: blocker\nkey: unapproved-write\nsummary: Unapproved write found\nsummary: Check the write\ndetails:\n- The timeline shows an unapproved write.\nresolved: none\nEND_ADVISOR_RESULT`;
     const { harness } = await loadAdvisor(reviewerReply);
     let spawned = 0;
     harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
     harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
 
     const result = await harness.callAgentTool("advisor_review", { focus: "Review the write." }, { threadId: "thread-primary" });
+    const badge = (await harness.callRpc("threadBadge", { threadId: "thread-primary" })) as { open: { severity: string } | null };
+
+    expect(result).toContain("Advisor blocker");
+    expect(result).toContain("Unapproved write found");
+    expect(result).toContain("ambiguous");
+    expect(badge.open?.severity).toBe("blocker");
+  });
+
+  it("does not close an earlier finding from an ambiguous blocker", async () => {
+    const { harness, setTimelineSeq, setAdvisorOutput } = await loadAdvisor(`ADVISOR_RESULT\nseverity: concern\nkey: old-defect\nsummary: Old defect\ndetails:\n- Verify the old defect.\nresolved: none\nEND_ADVISOR_RESULT`);
+    let retryChecks = 0;
+    let blockingRetry = false;
+    harness.sdk.stub("threads.interactions.list", async () => blockingRetry && ++retryChecks === 2 ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+    await harness.callAgentTool("advisor_review", { focus: "First review." }, { threadId: "thread-primary" });
+    setTimelineSeq(43);
+    setAdvisorOutput(`ADVISOR_RESULT\nevidence: sufficient\nseverity: blocker\nsummary: New blocker\nsummary: Check again\ndetails:\n- The new issue remains.\nresolved: old-defect\nEND_ADVISOR_RESULT`);
+    blockingRetry = true;
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Retry review." }, { threadId: "thread-primary" });
+    const reviews = (await harness.callRpc("threadReviews", { threadId: "thread-primary" })) as { reviews: { summary: string; closedAt: number | null }[] };
+
+    expect(result).toContain("Advisor blocker");
+    expect(reviews.reviews.find((review) => review.summary === "Old defect")?.closedAt).toBeNull();
+  });
+
+  it("does not expose a sensitive reviewer reply in an ambiguous incident", async () => {
+    const { harness } = await loadAdvisor(`ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: private-token-fixture\nsummary: ambiguous\nEND_ADVISOR_RESULT`);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the change." }, { threadId: "thread-primary" });
+    const badge = (await harness.callRpc("threadBadge", { threadId: "thread-primary" })) as { latestUnavailableReason: string };
 
     expect(result).toContain("Advisor unavailable");
-    expect(result).toContain("severity: blocker");
-    expect(result).toContain("Unapproved write found");
-    expect(result).toContain(reviewerReply);
+    expect(result).not.toContain("private-token-fixture");
+    expect(badge.latestUnavailableReason).not.toContain("private-token-fixture");
+  });
+
+  it("does not persist sensitive text when retry evidence is unavailable", async () => {
+    const { harness } = await loadAdvisor(`ADVISOR_RESULT\nevidence: unavailable\nseverity: pass\nsummary: private-token-fixture\nEND_ADVISOR_RESULT`);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the change." }, { threadId: "thread-primary" });
+    const badge = (await harness.callRpc("threadBadge", { threadId: "thread-primary" })) as { latestUnavailableReason: string };
+
+    expect(result).toContain("essential evidence could not be confirmed");
+    expect(result).not.toContain("private-token-fixture");
+    expect(badge.latestUnavailableReason).not.toContain("private-token-fixture");
   });
 
   it("does not close an open finding from conflicting retry fields", async () => {
