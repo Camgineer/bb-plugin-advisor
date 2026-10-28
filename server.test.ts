@@ -1085,6 +1085,46 @@ describe("late-finding continuation", () => {
     expect(pending.advice).toBeNull();
   });
 
+  it("does not send a finding already returned by the review tool while checking thread status", async () => {
+    const { harness } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    let releaseStatus!: () => void;
+    let statusStarted!: () => void;
+    const statusCheck = new Promise<void>((resolve) => { statusStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseStatus = resolve; });
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId === "thread-primary") {
+        const pending = await harness.callRpc("pendingAdvice", { threadId }) as { advice: unknown };
+        if (pending.advice) {
+          statusStarted();
+          await release;
+          return makeThreadResponse({ id: threadId, visibility: "visible", status: "active" });
+        }
+      }
+      return idleThread({ threadId });
+    });
+
+    const automaticReview = harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "Done.",
+    });
+    await statusCheck;
+    const toolResult = await harness.callAgentTool(
+      "advisor_review",
+      { focus: "Review the same work." },
+      { threadId: "thread-primary" },
+    );
+    releaseStatus();
+    await automaticReview;
+
+    expect(toolResult).toContain("The claimed test did not run");
+    const sends = harness.sdk.callsTo("threads.send").filter(
+      ([call]) => (call as { threadId: string }).threadId === "thread-primary",
+    );
+    expect(sends).toHaveLength(0);
+    const pending = await harness.callRpc("pendingAdvice", { threadId: "thread-primary" }) as { advice: unknown };
+    expect(pending.advice).toBeNull();
+  });
+
   it("steers an active turn even when idle auto-continuation is disabled", async () => {
     const { harness } = await loadAutoAdvisor(BLOCKER_OUTPUT);
     harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>

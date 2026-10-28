@@ -2680,6 +2680,8 @@ export default async function plugin(bb: BbPluginApi) {
         const pending = readPendingAdvice(primaryThreadId).find((candidate) => candidate.id === row.id);
         if (!pending || !advisorEnabledFor(primaryThreadId)) return;
         const thread = await bb.sdk.threads.get({ threadId: primaryThreadId });
+        const stillPending = readPendingAdvice(primaryThreadId).some((candidate) => candidate.id === row.id);
+        if (!stillPending || !advisorEnabledFor(primaryThreadId)) return;
         if (thread.status !== "active" && (thread.status !== "idle" || !currentSettings.autoContinue)) return;
         await continueWithFinding(primaryThreadId, row.id, thread.status === "idle");
       });

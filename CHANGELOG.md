@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.1.5
+## Unreleased
 
 - Steer active turns with actionable late findings, even when auto-continue is off. When the thread is idle, auto-continue controls whether Advisor starts a corrective turn. BB queues messages blocked by an interaction. Automatic idle follow-ups occur at most once per finding chain.
+
+## 0.1.5
 
 - Build with BB 0.47.1 and plugin SDK 0.6.79. The Advisor panel now registers as a thread tab through `experimental_tab`, because BB removed the old thread panel slot. The tab keeps its id, so panels users already opened still restore.
 - Accept any reasoning level a provider's model catalog reports. Catalogs now report reasoning as plain strings, and Advisor no longer rejects a level it does not know. A level literally named `default` is not offered, because **Model default** already uses that value.
