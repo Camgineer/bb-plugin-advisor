@@ -1891,9 +1891,11 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  const supportsPrimaryThread = (pluginId: string | null) =>
+    pluginId === null || pluginId === "bots-sidebar";
+
   bb.agents.configure((context) => {
-    const isPluginOwnedThread = context.origin.pluginId !== null;
-    if (isPluginOwnedThread || !advisorEnabledFor(context.thread.id)) {
+    if (!supportsPrimaryThread(context.origin.pluginId) || !advisorEnabledFor(context.thread.id)) {
       return { tools: [], skills: [] };
     }
 
@@ -1912,7 +1914,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         if (
           context.thread.status === "pending" &&
-          context.thread.originPluginId === null &&
+          supportsPrimaryThread(context.thread.originPluginId) &&
           advisorEnabledFor(context.thread.id)
         ) {
           recordPolicyTold(context.thread.id);
@@ -2628,7 +2630,7 @@ export default async function plugin(bb: BbPluginApi) {
    */
   bb.events.on("thread.active", async ({ thread }) => {
     if (
-      thread.originPluginId !== null ||
+      !supportsPrimaryThread(thread.originPluginId) ||
       thread.visibility === "hidden" ||
       briefingThreads.has(thread.id) ||
       !advisorEnabledFor(thread.id)
@@ -2692,10 +2694,8 @@ export default async function plugin(bb: BbPluginApi) {
       !currentSettings.autoReview ||
       !lastAssistantText ||
       thread.visibility === "hidden" ||
-      // Matches the gate in agents.configure: a plugin-owned thread never gets
-      // the advisor tool or instructions, so it can never consume the advice a
-      // post-turn review would leave pending for it.
-      thread.originPluginId !== null
+      // Keep review delivery aligned with the agent configuration gate.
+      !supportsPrimaryThread(thread.originPluginId)
     ) {
       return;
     }

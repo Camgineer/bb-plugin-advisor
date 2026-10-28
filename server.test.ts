@@ -156,6 +156,20 @@ async function startTurn(
 }
 
 describe("advisor agent configuration", () => {
+  it("enables review for a Bots Sidebar conversation", async () => {
+    const { harness } = await loadAdvisor(`ADVISOR_RESULT
+severity: pass
+summary: Looks correct
+details:
+none
+END_ADVISOR_RESULT`);
+    const bot = await harness.resolveAgentConfiguration({
+      ...primaryContext,
+      origin: { kind: null, pluginId: "bots-sidebar" },
+    });
+    expect(bot.tools.map((tool) => tool.name)).toEqual(["advisor_review"]);
+    expect(bot.instructions).toContain("MUST call advisor_review");
+  });
   it("requires the advisor gate for primary threads but not plugin-owned reviewers", async () => {
     const { harness } = await loadAdvisor(`ADVISOR_RESULT
 severity: pass
@@ -1547,6 +1561,21 @@ describe("advisor unavailability", () => {
 });
 
 describe("post-turn review scope", () => {
+  it("reviews completed visible Bots Sidebar conversations", async () => {
+    const { harness, spawn } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    await harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({
+        id: "thread-primary",
+        projectId: "project-test",
+        environmentId: "environment-test",
+        providerId: "codex",
+        visibility: "visible",
+        originPluginId: "bots-sidebar",
+      }),
+      lastAssistantText: "Work finished.",
+    });
+    expect(spawn).toHaveBeenCalled();
+  });
   it("skips a visible thread owned by another plugin", async () => {
     const { harness, spawn } = await loadAutoAdvisor(BLOCKER_OUTPUT);
 
