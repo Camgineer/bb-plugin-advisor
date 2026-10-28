@@ -604,6 +604,45 @@ function reviewBudget(timeoutSeconds: number): {
   };
 }
 
+function retryResultBlock(output: string): string | null {
+  const headers = Array.from(output.matchAll(/^[ \t]*ADVISOR_RESULT[ \t]*$/gim));
+  const endings = Array.from(output.matchAll(/^[ \t]*END_ADVISOR_RESULT[ \t]*$/gim));
+  const ambiguousMarkers = headers.length !== 1 || endings.length !== 1;
+  if (ambiguousMarkers) return null;
+
+  const block = output.match(/^[ \t]*ADVISOR_RESULT[ \t]*\r?\n[\s\S]*?^[ \t]*END_ADVISOR_RESULT[ \t]*$/im)?.[0];
+  const missingBlock = block === undefined;
+  if (missingBlock) return null;
+
+  const fields = Array.from(
+    block.matchAll(/^[ \t]*(?:evidence|severity|key|summary|resolved)[ \t]*:/gim),
+    (match) => match[0].replace(/[ \t:]/g, "").toLowerCase(),
+  );
+  const duplicateFields = new Set(fields).size !== fields.length;
+  if (duplicateFields) return null;
+
+  const missingSeverity = !/^[ \t]*severity[ \t]*:[ \t]*(?:pass|nit|concern|blocker)[ \t]*\r?$/im.test(block);
+  if (missingSeverity) return null;
+
+  return block;
+}
+
+function ambiguousRetryFinding(output: string) {
+  const block = output.match(/^[ \t]*ADVISOR_RESULT[ \t]*\r?\n[\s\S]*?^[ \t]*END_ADVISOR_RESULT[ \t]*$/im)?.[0];
+  if (block === undefined) return null;
+
+  const severityFields = Array.from(block.matchAll(/^[ \t]*severity[ \t]*:/gim));
+  const oneFindingSeverity = severityFields.length === 1 && /^[ \t]*severity[ \t]*:[ \t]*(?:nit|concern|blocker)[ \t]*\r?$/im.test(block);
+  if (!oneFindingSeverity) return null;
+
+  const finding = parseAdvisorOutput(block);
+  if (!finding) return null;
+  finding.key = "";
+  finding.resolvedKeys = [];
+  finding.details = `The retry reply was ambiguous; its evidence and resolved findings could not be confirmed.\n\n${finding.details}`;
+  return finding;
+}
+
 function buildAdvisorPrompt(args: {
   primaryThreadId: string;
   sourceSeq: number;
@@ -613,6 +652,7 @@ function buildAdvisorPrompt(args: {
   timeoutSeconds: number;
   openFindings: readonly { key: string; summary: string }[];
   openFindingsTruncated: boolean;
+  permissionRetry: boolean;
 }): string {
   const budget = reviewBudget(args.timeoutSeconds);
   return `You are the independent advisor for bb coding thread ${args.primaryThreadId}.
@@ -636,6 +676,9 @@ Review budget:
 - Perform at most ${budget.maxInspectionActions} read-only inspection or command actions. Prefer native file-reading tools and supplied evidence; avoid network requests and commands requiring permission. Do not rerun broad test suites or builds—the primary agent already owns verification.
 - Never edit files or perform external actions. If essential evidence is unavailable, state the missing evidence and do not claim it was verified.
 - If exhaustive verification would exceed the budget, report the strongest concrete issue you can support, or pass when you found none. Never omit the result format.
+${args.permissionRetry ? `
+The previous attempt stopped at a permission request. Use the supplied timeline and native file reads. For local inspection, use a working directory instead of a compound cd command; avoid network requests. Do not request permission or bypass the restriction. If essential evidence remains inaccessible, set evidence to unavailable and name the missing evidence in details. Otherwise set evidence to sufficient.
+` : ""}
 
 Findings you raised earlier on this thread that are still open:
 ${
@@ -660,7 +703,7 @@ ${args.transcript}
 Return exactly one result in this format. Use pass and silence-equivalent details when there is no actionable issue. Do not repeat old advice merely to have something to say.
 
 ADVISOR_RESULT
-severity: pass|nit|concern|blocker
+${args.permissionRetry ? "evidence: sufficient|unavailable\n" : ""}severity: pass|nit|concern|blocker
 key: a short stable slug naming the defect itself, anchored to where it lives, e.g. server-ts-runreview-timeout-untested. Use the SAME key whenever you raise the same underlying defect again, even if you reword it or rate it differently. Use "none" for a pass.
 summary: one concise line
 details:
@@ -2288,6 +2331,7 @@ export default async function plugin(bb: BbPluginApi) {
     timeline: { rows: readonly object[]; maxSeq: number },
     signal: AbortSignal | undefined,
     reportBlocked = true,
+    permissionRetry = false,
   ): Promise<AdvisorOutcome> {
     // Every non-review exit goes through here, so a failure is always recorded
     // as an incident and can never be silently absent from the panel.
@@ -2327,6 +2371,7 @@ export default async function plugin(bb: BbPluginApi) {
           summary: finding.summary,
         })),
       openFindingsTruncated: openFindings.length > MAX_PROMPTED_OPEN_FINDINGS,
+      permissionRetry,
     });
     let advisor: { id: string; startedWithPrompt: boolean };
     try {
@@ -2468,13 +2513,30 @@ export default async function plugin(bb: BbPluginApi) {
     // Repeated advice is recorded as a repeat, never softened: identical advice
     // means the primary agent was already told and has not resolved it, which
     // is the case where downgrading to a pass is most harmful.
-    const review = parseAdvisorOutput(output);
+    const reviewOutput = permissionRetry ? retryResultBlock(output) : output;
+    const missingReviewOutput = reviewOutput === null;
+    const review = missingReviewOutput
+      ? ambiguousRetryFinding(output)
+      : parseAdvisorOutput(reviewOutput);
+    if (missingReviewOutput && !review) {
+      return unavailable("the retry did not return a complete ADVISOR_RESULT block or returned ambiguous fields; essential evidence could not be confirmed and the reply may contain unresolved findings; treat existing findings as still open and the review as incomplete");
+    }
     if (!review) {
       // Prose with no verdict is not a finding. Fabricating a `concern` here
       // would hand the agent work to do based on nothing.
-      return unavailable(
-        `the reviewer's reply carried no verdict (${output.trim().slice(0, 160)})`,
-      );
+      return unavailable("the reviewer's reply carried no verdict");
+    }
+    if (permissionRetry && reviewOutput !== null) {
+      const evidence = reviewOutput.match(/^[ \t]*evidence[ \t]*:[ \t]*(sufficient|unavailable)[ \t]*\r?$/im)?.[1]?.toLowerCase();
+      const evidenceUnconfirmed = evidence !== "sufficient";
+      if (evidenceUnconfirmed) {
+        const passed = review.severity === "pass";
+        if (passed) {
+          return unavailable("essential evidence could not be confirmed after a permission request");
+        }
+        review.details = `Essential evidence could not be confirmed after a permission request.\n\n${review.details}`;
+        review.resolvedKeys = [];
+      }
     }
     const normalized = normalizeAdvice(review);
     // Prefer the advisor's own stable key: it survives rewording and a changed
@@ -2615,7 +2677,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const outcome = await runReview(primaryThreadId, focus, timeline, signal, false);
       if (outcome.kind === "unavailable" && outcome.reason === BLOCKED_REASON && !signal?.aborted) {
-        return runReview(primaryThreadId, focus, timeline, signal);
+        return runReview(primaryThreadId, focus, timeline, signal, true, true);
       }
       return outcome;
     })().finally(() => {
