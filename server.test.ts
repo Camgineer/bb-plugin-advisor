@@ -1561,6 +1561,63 @@ describe("advisor unavailability", () => {
 });
 
 describe("post-turn review scope", () => {
+  it("waits for an in-flight stop when cancellation races with completion", async () => {
+    const { harness } = await loadAdvisor(BLOCKER_OUTPUT);
+    const controller = new AbortController();
+    let finishStop = () => {};
+    let stopped = false;
+    harness.sdk.stub("threads.stop", async () => {
+      await new Promise<void>((resolve) => { finishStop = resolve; });
+      stopped = true;
+      return { ok: true };
+    });
+    harness.sdk.stub("threads.wait", async () => {
+      controller.abort();
+      return { matched: true };
+    });
+    const review = harness.callAgentTool("advisor_review", { focus: "Cancellation race" }, {
+      threadId: "thread-primary", signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.sdk.callsTo("threads.output")).toHaveLength(0);
+    finishStop();
+    expect(await review).toContain("cancelled");
+    expect(stopped).toBe(true);
+  });
+  it("waits for a stopping reviewer before reusing it", async () => {
+    const { harness, setTimelineSeq } = await loadAdvisor(BLOCKER_OUTPUT);
+    await harness.callAgentTool("advisor_review", { focus: "First" }, { threadId: "thread-primary" });
+    setTimelineSeq(43);
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      makeThreadResponse({ id: threadId, status: threadId === "thread-advisor" ? "stopping" : "idle", projectId: "project-test", environmentId: "environment-test", providerId: "codex" }));
+    const result = await harness.callAgentTool("advisor_review", { focus: "Second" }, { threadId: "thread-primary" });
+    expect(result).toContain("still unresolved");
+    expect(harness.sdk.callsTo("threads.wait").length).toBeGreaterThanOrEqual(3);
+  });
+  it("cancels a queued review promptly without releasing the active reviewer", async () => {
+    const { harness, setTimelineSeq } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    let release = () => {};
+    harness.sdk.stub("threads.wait", async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { matched: true };
+    });
+    const first = harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "First turn completed.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setTimelineSeq(43);
+    const controller = new AbortController();
+    const second = harness.callAgentTool("advisor_review", { focus: "Later turn" }, {
+      threadId: "thread-primary", signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    expect(await second).toContain("cancelled");
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
+    release();
+    await first;
+  });
   it("reviews completed visible Bots Sidebar conversations", async () => {
     const { harness, spawn } = await loadAutoAdvisor(BLOCKER_OUTPUT);
     await harness.emitThreadEvent("thread.idle", {

@@ -2130,15 +2130,23 @@ export default async function plugin(bb: BbPluginApi) {
       // reviewer's write access.
       stored.data.permission_mode === candidates[0]
     ) {
+      let thread: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
       try {
-        const thread = await bb.sdk.threads.get({
+        thread = await bb.sdk.threads.get({
           threadId: stored.data.advisor_thread_id,
         });
-        if (!thread.archivedAt && !thread.deletedAt) {
-          return { id: thread.id, startedWithPrompt: false };
-        }
       } catch (error) {
         bb.log.warn(`Recreating missing advisor thread: ${String(error)}`);
+      }
+      if (thread && !thread.archivedAt && !thread.deletedAt) {
+        if (thread.status !== "idle") {
+          await withTimeout(
+            (waitSignal) => bb.sdk.threads.wait({ threadId: thread!.id, status: "idle", timeoutMs: 10_000, signal: waitSignal }),
+            10_000,
+            "The previous reviewer did not become idle.",
+          );
+        }
+        return { id: thread.id, startedWithPrompt: false };
       }
     }
 
@@ -2323,16 +2331,22 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     const advisorThreadId = advisor.id;
-    const stopAdvisor = (): void => {
-      void bb.sdk.threads
-        .stop({ threadId: advisorThreadId })
-        .catch(() => undefined);
-    };
+    let stopping: Promise<unknown> | undefined;
+    const stopAdvisor = () => stopping ??= withTimeout(
+      () => bb.sdk.threads.stop({ threadId: advisorThreadId }),
+      10_000,
+      "The reviewer did not stop in time.",
+    ).catch((error) => {
+      // A delayed stop must never target a later review on the same thread.
+      db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
+        .run(primaryThreadId, advisorThreadId);
+      throw error;
+    });
     if (signal?.aborted) {
-      stopAdvisor();
+      await stopAdvisor().catch(() => undefined);
       return unavailable(CANCELLED_REASON);
     }
-    const onAbort = (): void => stopAdvisor();
+    const onAbort = (): void => { void stopAdvisor().catch(() => undefined); };
     signal?.addEventListener("abort", onAbort, { once: true });
 
     const timeoutMs = currentSettings.timeoutSeconds * 1000;
@@ -2365,7 +2379,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(signal ? { signal } : {}),
       });
     } catch (error) {
-      stopAdvisor();
+      await stopAdvisor().catch(() => undefined);
       // A timeout is self-describing; the exception name and the reviewer's
       // thread id are developer detail that ends up verbatim in the panel.
       bb.log.warn(`Advisor review timed out: ${describeError(error)}`);
@@ -2377,6 +2391,10 @@ export default async function plugin(bb: BbPluginApi) {
     } finally {
       clearTimeout(finalizeTimer);
       signal?.removeEventListener("abort", onAbort);
+    }
+    if (stopping) {
+      await stopping.catch(() => undefined);
+      if (signal?.aborted) return unavailable(CANCELLED_REASON);
     }
     let output: string | null;
     try {
@@ -2531,16 +2549,27 @@ export default async function plugin(bb: BbPluginApi) {
     if (inflight) return inflight;
     const previous = reviewTails.get(primaryThreadId);
     const promise = (async () => {
-      if (previous) await previous.catch(() => undefined);
+      if (previous) {
+        try {
+          await withTimeout(() => previous.catch(() => undefined), currentSettings.timeoutSeconds * 1000, "review queue timeout", signal);
+        } catch {
+          const reason = signal?.aborted ? CANCELLED_REASON : "the review timed out waiting for a previous review";
+          recordIncident(primaryThreadId, timeline.maxSeq, reason);
+          return { kind: "unavailable", reason } satisfies AdvisorOutcome;
+        }
+      }
       return runReview(primaryThreadId, focus, timeline, signal);
     })().finally(() => {
       inFlight.delete(key);
-      if (reviewTails.get(primaryThreadId) === promise) {
-        reviewTails.delete(primaryThreadId);
-      }
+    });
+    const barrierWork = previous
+      ? Promise.all([previous.catch(() => undefined), promise]).then(([, result]) => result)
+      : promise;
+    const barrier = barrierWork.finally(() => {
+      if (reviewTails.get(primaryThreadId) === barrier) reviewTails.delete(primaryThreadId);
     });
     inFlight.set(key, promise);
-    reviewTails.set(primaryThreadId, promise);
+    reviewTails.set(primaryThreadId, barrier);
     return promise;
   }
 
