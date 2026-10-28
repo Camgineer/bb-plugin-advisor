@@ -860,6 +860,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   const primaryContexts = new Map<string, PrimaryContext>();
   const inFlight = new Map<string, Promise<AdvisorOutcome>>();
+  const reviewTails = new Map<string, Promise<AdvisorOutcome>>();
   const reviewingThreads = new Map<string, number>();
   /** Manual reviews requested while the primary turn is still active. */
   const waitingForCompletion = new Set<string>();
@@ -2267,6 +2268,7 @@ export default async function plugin(bb: BbPluginApi) {
       recordIncident(primaryThreadId, timeline.maxSeq, reason);
       return { kind: "unavailable", reason };
     };
+    if (signal?.aborted) return unavailable(CANCELLED_REASON);
 
     let context: PrimaryContext;
     let resolved: Extract<AdvisorModelResolution, { kind: "ready" }>;
@@ -2527,12 +2529,18 @@ export default async function plugin(bb: BbPluginApi) {
     // outcome. Only the first caller's signal cancels it; a cancelled shared
     // review resolves `unavailable`, which never reads as approval.
     if (inflight) return inflight;
-    const promise = runReview(primaryThreadId, focus, timeline, signal).finally(
-      () => {
-        inFlight.delete(key);
-      },
-    );
+    const previous = reviewTails.get(primaryThreadId);
+    const promise = (async () => {
+      if (previous) await previous.catch(() => undefined);
+      return runReview(primaryThreadId, focus, timeline, signal);
+    })().finally(() => {
+      inFlight.delete(key);
+      if (reviewTails.get(primaryThreadId) === promise) {
+        reviewTails.delete(primaryThreadId);
+      }
+    });
     inFlight.set(key, promise);
+    reviewTails.set(primaryThreadId, promise);
     return promise;
   }
 

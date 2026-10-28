@@ -1627,13 +1627,17 @@ describe("post-turn review scope", () => {
       { focus: "Review turn two." },
       { threadId: "thread-primary" },
     );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The same persistent reviewer must not start a second review while busy.
+    expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1);
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
     releaseFirstWait();
     await postTurn;
 
     // A second review really ran, and it is the later turn's own review — a
     // joined earlier-turn review would not be recorded as a repeat.
-    expect(harness.sdk.callsTo("threads.output")).toHaveLength(2);
     expect(await toolResult).toContain("still unresolved");
+    expect(harness.sdk.callsTo("threads.output")).toHaveLength(2);
   });
 
   it("does not re-review a turn the advisor tool already reviewed", async () => {
