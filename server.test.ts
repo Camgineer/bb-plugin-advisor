@@ -2672,7 +2672,7 @@ END_ADVISOR_RESULT`);
   });
 
   it("treats a reply with no verdict as the advisor not having run", async () => {
-    const { harness } = await loadAdvisor("I had a look and it seems fine.");
+    const { harness } = await loadAdvisor("I had a look: private-token-fixture");
 
     const result = await harness.callAgentTool(
       "advisor_review",
@@ -2688,6 +2688,10 @@ END_ADVISOR_RESULT`);
     })) as { reviews: unknown[]; incidents: unknown[] };
     expect(panel.reviews).toHaveLength(0);
     expect(panel.incidents).toHaveLength(1);
+    const badge = (await harness.callRpc("threadBadge", { threadId: "thread-primary" })) as { latestUnavailableReason: string };
+    expect(result).not.toContain("private-token-fixture");
+    expect(badge.latestUnavailableReason).not.toContain("private-token-fixture");
+    expect(JSON.stringify(panel.incidents)).not.toContain("private-token-fixture");
   });
 
   it("keeps review history when a thread is archived, drops it when deleted", async () => {

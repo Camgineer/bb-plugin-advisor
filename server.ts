@@ -2524,9 +2524,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!review) {
       // Prose with no verdict is not a finding. Fabricating a `concern` here
       // would hand the agent work to do based on nothing.
-      return unavailable(
-        `the reviewer's reply carried no verdict (${output.trim().slice(0, 160)})`,
-      );
+      return unavailable("the reviewer's reply carried no verdict");
     }
     if (permissionRetry && reviewOutput !== null) {
       const evidence = reviewOutput.match(/^[ \t]*evidence[ \t]*:[ \t]*(sufficient|unavailable)[ \t]*\r?$/im)?.[1]?.toLowerCase();
