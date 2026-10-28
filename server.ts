@@ -2474,7 +2474,13 @@ export default async function plugin(bb: BbPluginApi) {
     // Repeated advice is recorded as a repeat, never softened: identical advice
     // means the primary agent was already told and has not resolved it, which
     // is the case where downgrading to a pass is most harmful.
-    const review = parseAdvisorOutput(output);
+    const reviewOutput = permissionRetry
+      ? output.match(/^[ \t]*ADVISOR_RESULT[ \t]*\r?\n[\s\S]*?^[ \t]*END_ADVISOR_RESULT[ \t]*$/im)?.[0]
+      : output;
+    if (!reviewOutput) {
+      return unavailable("the retry did not return a complete ADVISOR_RESULT block");
+    }
+    const review = parseAdvisorOutput(reviewOutput);
     if (!review) {
       // Prose with no verdict is not a finding. Fabricating a `concern` here
       // would hand the agent work to do based on nothing.
@@ -2483,7 +2489,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
     }
     if (permissionRetry) {
-      const evidence = output.match(/^\s*evidence\s*:\s*(sufficient|unavailable)\s*$/im)?.[1]?.toLowerCase();
+      const evidence = reviewOutput.match(/^\s*evidence\s*:\s*(sufficient|unavailable)\s*$/im)?.[1]?.toLowerCase();
       if (evidence !== "sufficient") {
         if (review.severity === "pass") {
           return unavailable(`essential evidence could not be confirmed after a permission request (${output.trim().slice(0, 1000)})`);

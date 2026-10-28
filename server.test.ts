@@ -1390,6 +1390,11 @@ describe("advisor session environment binding", () => {
     expect(result).toContain("permission");
     expect(harness.sdk.callsTo("threads.interactions.resolve")).toHaveLength(0);
     expect(harness.sdk.callsTo("threads.stop")).toHaveLength(2);
+    const panel = await harness.callRpc("threadReviews", { threadId: "thread-primary" });
+    expect(panel).toEqual(expect.objectContaining({
+      reviews: [],
+      incidents: [expect.objectContaining({ reason: expect.stringContaining("permission") })],
+    }));
   }, 10000);
 
   it("reports a failed post-review interaction check without calling it a timeout", async () => {
@@ -1429,6 +1434,8 @@ describe("advisor session environment binding", () => {
     expect(prompts[1]).toContain("permission request");
     expect(prompts[1]).toContain("network");
     expect(prompts[1]).toContain("working directory");
+    expect(prompts[0]).not.toContain("evidence: sufficient|unavailable");
+    expect(prompts[1]).toContain("evidence: sufficient|unavailable");
   }, 10000);
 
   it("does not approve a retry when essential evidence is unavailable", async () => {
@@ -1442,6 +1449,54 @@ describe("advisor session environment binding", () => {
     expect(result).toContain("Advisor unavailable");
     expect(result).toContain("Langfuse read unavailable");
     expect(harness.sdk.callsTo("threads.interactions.resolve")).toHaveLength(0);
+  });
+
+  it("preserves missing evidence named before the result block", async () => {
+    const { harness } = await loadAdvisor(`Langfuse read unavailable\nADVISOR_RESULT\nevidence: unavailable\nseverity: pass\nsummary: Cannot inspect evaluator\ndetails:\nnone\nEND_ADVISOR_RESULT`);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review evaluator readback." }, { threadId: "thread-primary" });
+
+    expect(result).toContain("Advisor unavailable");
+    expect(result).toContain("Langfuse read unavailable");
+  });
+
+  it("does not approve a retry whose result block says evidence is unavailable", async () => {
+    const { harness } = await loadAdvisor(`evidence: sufficient\nADVISOR_RESULT\nevidence: unavailable\nseverity: pass\nsummary: Cannot inspect evaluator\ndetails:\n- Langfuse read unavailable\nEND_ADVISOR_RESULT`);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review evaluator readback." }, { threadId: "thread-primary" });
+
+    expect(result).toContain("Advisor unavailable");
+    expect(result).toContain("Langfuse read unavailable");
+  });
+
+  it("does not hide a supported concern behind a stray pass before the result block", async () => {
+    const { harness } = await loadAdvisor(`severity: pass\nADVISOR_RESULT\nevidence: unavailable\nseverity: concern\nsummary: Unapproved write\ndetails:\n- The timeline shows an unapproved write.\nEND_ADVISOR_RESULT`);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the write." }, { threadId: "thread-primary" });
+
+    expect(result).toContain("Advisor concern");
+    expect(result).toContain("Unapproved write");
+  });
+
+  it("does not approve a retry without a complete result block", async () => {
+    const { harness } = await loadAdvisor(`evidence: sufficient\nseverity: pass\nsummary: Reviewed`);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the change." }, { threadId: "thread-primary" });
+
+    expect(result).toContain("Advisor unavailable");
+    expect(result).toContain("complete ADVISOR_RESULT block");
   });
 
   it("does not approve a retry that omits the evidence status", async () => {
