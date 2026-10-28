@@ -604,6 +604,24 @@ function reviewBudget(timeoutSeconds: number): {
   };
 }
 
+function retryResultBlock(output: string): string | null {
+  const headers = Array.from(output.matchAll(/^[ \t]*ADVISOR_RESULT[ \t]*$/gim));
+  const endings = Array.from(output.matchAll(/^[ \t]*END_ADVISOR_RESULT[ \t]*$/gim));
+  const ambiguousMarkers = headers.length !== 1 || endings.length !== 1;
+  if (ambiguousMarkers) return null;
+
+  const block = output.match(/^[ \t]*ADVISOR_RESULT[ \t]*\r?\n[\s\S]*?^[ \t]*END_ADVISOR_RESULT[ \t]*$/im)?.[0];
+  const missingBlock = block === undefined;
+  if (missingBlock) return null;
+
+  const evidenceFields = Array.from(block.matchAll(/^[ \t]*evidence[ \t]*:/gim));
+  const severityFields = Array.from(block.matchAll(/^[ \t]*severity[ \t]*:/gim));
+  const duplicateFields = evidenceFields.length > 1 || severityFields.length > 1;
+  if (duplicateFields) return null;
+
+  return block;
+}
+
 function buildAdvisorPrompt(args: {
   primaryThreadId: string;
   sourceSeq: number;
@@ -2474,9 +2492,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Repeated advice is recorded as a repeat, never softened: identical advice
     // means the primary agent was already told and has not resolved it, which
     // is the case where downgrading to a pass is most harmful.
-    const reviewOutput = permissionRetry
-      ? output.match(/^[ \t]*ADVISOR_RESULT[ \t]*\r?\n[\s\S]*?^[ \t]*END_ADVISOR_RESULT[ \t]*$/im)?.[0]
-      : output;
+    const reviewOutput = permissionRetry ? retryResultBlock(output) : output;
     if (!reviewOutput) {
       return unavailable("the retry did not return a complete ADVISOR_RESULT block");
     }

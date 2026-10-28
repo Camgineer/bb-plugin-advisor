@@ -1499,6 +1499,23 @@ describe("advisor session environment binding", () => {
     expect(result).toContain("complete ADVISOR_RESULT block");
   });
 
+  it.each([
+    ["duplicate result headers", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed\nADVISOR_RESULT\nevidence: unavailable\nseverity: pass\nsummary: Cannot inspect\nEND_ADVISOR_RESULT`],
+    ["duplicate result endings", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed\nEND_ADVISOR_RESULT\nEND_ADVISOR_RESULT`],
+    ["conflicting evidence fields", `ADVISOR_RESULT\nevidence: sufficient\nevidence: unavailable\nseverity: pass\nsummary: Cannot inspect\nEND_ADVISOR_RESULT`],
+    ["conflicting severity fields", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nseverity: concern\nsummary: Unapproved write\nEND_ADVISOR_RESULT`],
+    ["out-of-order result markers", `END_ADVISOR_RESULT\nADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed`],
+  ])("does not approve a retry with %s", async (_description, output) => {
+    const { harness } = await loadAdvisor(output);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the change." }, { threadId: "thread-primary" });
+
+    expect(result).toContain("Advisor unavailable");
+  });
+
   it("does not approve a retry that omits the evidence status", async () => {
     const { harness } = await loadAdvisor(`ADVISOR_RESULT\nseverity: pass\nsummary: Reviewed\ndetails:\nnone\nEND_ADVISOR_RESULT`);
     let spawned = 0;
