@@ -41,6 +41,7 @@ type AdvisorPermissionMode = NonNullable<
 >;
 /** Advice about a turn this old is stale; it is retired instead of sent. */
 const PENDING_ADVICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BLOCKED_REASON = "the reviewer requested permission and was stopped without granting it; the next review will use a fresh session";
 const CANCELLED_REASON =
   "the primary turn was cancelled before the review finished";
 /**
@@ -632,7 +633,8 @@ Review budget:
 - The host stops this review after ${args.timeoutSeconds} seconds. Finish and emit the structured result before then; reserve the final ${budget.reserveSeconds} seconds for it.
 - Do not send progress updates. Your only assistant message must be the final ADVISOR_RESULT block.
 - Use the supplied timeline and focus first. Inspect only files needed to verify a concrete risk; do not broadly inventory the workspace.
-- Perform at most ${budget.maxInspectionActions} read-only inspection or command actions. Do not rerun broad test suites or builds—the primary agent already owns verification.
+- Perform at most ${budget.maxInspectionActions} read-only inspection or command actions. Prefer native file-reading tools and supplied evidence; avoid network requests and commands requiring permission. Do not rerun broad test suites or builds—the primary agent already owns verification.
+- Never edit files or perform external actions. If essential evidence is unavailable, state the missing evidence and do not claim it was verified.
 - If exhaustive verification would exceed the budget, report the strongest concrete issue you can support, or pass when you found none. Never omit the result format.
 
 Findings you raised earlier on this thread that are still open:
@@ -2138,7 +2140,23 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (error) {
         bb.log.warn(`Recreating missing advisor thread: ${String(error)}`);
       }
-      if (thread && !thread.archivedAt && !thread.deletedAt) {
+      let reusable = Boolean(thread && !thread.archivedAt && !thread.deletedAt);
+      if (thread && reusable) {
+        try {
+          const interactions = await bb.sdk.threads.interactions.list({ threadId: thread.id });
+          if (interactions.some((item) => item.status === "pending" || item.status === "resolving")) {
+            reusable = false;
+            db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
+              .run(primaryThreadId, thread.id);
+            await withTimeout(() => bb.sdk.threads.stop({ threadId: thread!.id }), 10_000, "The blocked reviewer did not stop.")
+              .catch((error) => bb.log.warn(`Could not stop blocked reviewer: ${describeError(error)}`));
+          }
+        } catch (error) {
+          reusable = false;
+          bb.log.warn(`Could not check stored reviewer interactions: ${describeError(error)}`);
+        }
+      }
+      if (thread && reusable) {
         if (thread.status !== "idle") {
           await withTimeout(
             (waitSignal) => bb.sdk.threads.wait({ threadId: thread!.id, status: "idle", timeoutMs: 10_000, signal: waitSignal }),
@@ -2269,11 +2287,12 @@ export default async function plugin(bb: BbPluginApi) {
     focus: string,
     timeline: { rows: readonly object[]; maxSeq: number },
     signal: AbortSignal | undefined,
+    reportBlocked = true,
   ): Promise<AdvisorOutcome> {
     // Every non-review exit goes through here, so a failure is always recorded
     // as an incident and can never be silently absent from the panel.
     const unavailable = (reason: string): AdvisorOutcome => {
-      recordIncident(primaryThreadId, timeline.maxSeq, reason);
+      if (reason !== BLOCKED_REASON || reportBlocked) recordIncident(primaryThreadId, timeline.maxSeq, reason);
       return { kind: "unavailable", reason };
     };
     if (signal?.aborted) return unavailable(CANCELLED_REASON);
@@ -2349,6 +2368,22 @@ export default async function plugin(bb: BbPluginApi) {
     const onAbort = (): void => { void stopAdvisor().catch(() => undefined); };
     signal?.addEventListener("abort", onAbort, { once: true });
 
+    let monitoring = true;
+    let checkingInteraction = false;
+    let blockedByInteraction = false;
+    const interactionTimer = setInterval(() => {
+      if (checkingInteraction || !monitoring) return;
+      checkingInteraction = true;
+      void bb.sdk.threads.interactions.list({ threadId: advisorThreadId }).then((items) => {
+        if (!monitoring || !items.some((item) => item.status === "pending" || item.status === "resolving")) return;
+        blockedByInteraction = true;
+        db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
+          .run(primaryThreadId, advisorThreadId);
+        void stopAdvisor().catch(() => undefined);
+      }).catch((error) => {
+        bb.log.warn(`Could not check reviewer interactions: ${describeError(error)}`);
+      }).finally(() => { checkingInteraction = false; });
+    }, 1_000);
     const timeoutMs = currentSettings.timeoutSeconds * 1000;
     const { finalizeAfterMs } = reviewBudget(currentSettings.timeoutSeconds);
     const finalizeTimer = setTimeout(() => {
@@ -2378,6 +2413,12 @@ export default async function plugin(bb: BbPluginApi) {
         timeoutMs,
         ...(signal ? { signal } : {}),
       });
+      const interactions = await bb.sdk.threads.interactions.list({ threadId: advisorThreadId });
+      if (interactions.some((item) => item.status === "pending" || item.status === "resolving")) {
+        blockedByInteraction = true;
+        db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
+          .run(primaryThreadId, advisorThreadId);
+      }
     } catch (error) {
       await stopAdvisor().catch(() => undefined);
       // A timeout is self-describing; the exception name and the reviewer's
@@ -2386,11 +2427,19 @@ export default async function plugin(bb: BbPluginApi) {
       return unavailable(
         signal?.aborted
           ? CANCELLED_REASON
-          : `the review did not finish within ${currentSettings.timeoutSeconds}s. Raise "Review timeout" in Settings → Extensions → Advisor if reviews need longer`,
+          : blockedByInteraction
+            ? BLOCKED_REASON
+            : `the review did not finish within ${currentSettings.timeoutSeconds}s. Raise "Review timeout" in Settings → Extensions → Advisor if reviews need longer`,
       );
     } finally {
+      monitoring = false;
+      clearInterval(interactionTimer);
       clearTimeout(finalizeTimer);
       signal?.removeEventListener("abort", onAbort);
+    }
+    if (blockedByInteraction) {
+      await stopAdvisor().catch(() => undefined);
+      return unavailable(BLOCKED_REASON);
     }
     if (stopping) {
       await stopping.catch(() => undefined);
@@ -2558,7 +2607,11 @@ export default async function plugin(bb: BbPluginApi) {
           return { kind: "unavailable", reason } satisfies AdvisorOutcome;
         }
       }
-      return runReview(primaryThreadId, focus, timeline, signal);
+      const outcome = await runReview(primaryThreadId, focus, timeline, signal, false);
+      if (outcome.kind === "unavailable" && outcome.reason === BLOCKED_REASON && !signal?.aborted) {
+        return runReview(primaryThreadId, focus, timeline, signal);
+      }
+      return outcome;
     })().finally(() => {
       inFlight.delete(key);
     });

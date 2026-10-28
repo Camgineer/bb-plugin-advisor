@@ -272,13 +272,11 @@ turn stays pending. A waiting **Review now** request is settled as unavailable
 and can be retried instead of remaining stuck. Cancelling the primary turn
 stops the reviewer thread.
 
-Claude Code in Accept Edits mode can still ask for approval before running a
-shell command. Because the reviewer thread is hidden, that request can leave a
-review waiting until it times out. Use **Show reviewer** to inspect the pending
-request and approve only commands you intend to allow, then retry the review.
-Increasing the timeout alone does not resolve an unanswered approval. A reviewer
-may instead assess the supplied transcript; its result should say when it did
-not independently run commands.
+A reviewer can ask for a permission approval. Advisor stops that reviewer
+without granting the request and retries once in a fresh session. If the retry
+also needs approval, the review is unavailable. A retry can take up to a
+second review timeout. Reviewers are told to use available read-only tools and
+state when essential evidence is missing.
 
 ## The reviewer thread
 

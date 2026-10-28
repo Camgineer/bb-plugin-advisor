@@ -76,6 +76,7 @@ async function loadAdvisor(
     settings: { autoReview: false, ...storedSettings },
     sdk: {
       threads: {
+        interactions: { list: async () => [] },
         timeline: async () => timeline(timelineSeq),
         get: idleThread,
         spawn,
@@ -1375,6 +1376,75 @@ describe("advisor session environment binding", () => {
     );
 
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("reports a blocked reviewer promptly without granting the requested permission", async () => {
+    const { harness } = await loadAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("threads.interactions.list", async () => [{ id: "pending-reviewer", status: "pending", payload: { kind: "approval" } }]);
+    let finish = () => {};
+    harness.sdk.stub("threads.wait", async () => { await new Promise<void>((resolve) => { finish = resolve; }); return { matched: true }; });
+    harness.sdk.stub("threads.stop", async () => { finish(); return { ok: true }; });
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review blocked by permission." }, { threadId: "thread-primary" });
+    expect(result).toContain("Advisor unavailable");
+    expect(result).toContain("permission");
+    expect(harness.sdk.callsTo("threads.interactions.resolve")).toHaveLength(0);
+    expect(harness.sdk.callsTo("threads.stop")).toHaveLength(2);
+  }, 10000);
+
+  it("does not accept stale output when the reviewer goes idle with a prompt", async () => {
+    const { harness } = await loadAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("threads.interactions.list", async () => [{ id: "blocked", status: "pending", payload: { kind: "approval" } }]);
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review with pending interaction." }, { threadId: "thread-primary" });
+    expect(result).toContain("Advisor unavailable");
+    expect(harness.sdk.callsTo("threads.output")).toHaveLength(0);
+  });
+
+  it("retries a permission-blocked review on a fresh session", async () => {
+    const { harness } = await loadAutoAdvisor(`ADVISOR_RESULT\nseverity: pass\nsummary: Reviewed\ndetails:\nnone\nEND_ADVISOR_RESULT`);
+    let spawned = 0;
+    let finish = () => {};
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+    harness.sdk.stub("threads.wait", async ({ threadId }: { threadId: string }) => { if (threadId === "reviewer-1") await new Promise<void>((resolve) => { finish = resolve; }); return { matched: true }; });
+    harness.sdk.stub("threads.stop", async () => { finish(); return { ok: true }; });
+    await harness.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }), lastAssistantText: "Done." });
+    const badge = await harness.callRpc("threadBadge", { threadId: "thread-primary" });
+    expect(badge).toEqual(expect.objectContaining({ lifecycle: "approved" }));
+    expect(spawned).toBe(2);
+    expect(harness.sdk.callsTo("threads.interactions.resolve")).toHaveLength(0);
+  }, 10000);
+
+  it("replaces an idle reviewer with a pending interaction before the next review", async () => {
+    const { bb, harness, spawn } = await loadAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("providers.models", async () => NEGOTIABLE_CATALOG);
+    let firstCheck = true;
+    harness.sdk.stub("threads.interactions.list", async () => {
+      if (!firstCheck) return [];
+      firstCheck = false;
+      return [{ id: "pending-reviewer", status: "pending", payload: { kind: "approval" } }];
+    });
+    seedSession(bb, "accept-edits");
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the next turn." }, { threadId: "thread-primary" });
+    expect(result).toContain("Advisor blocker");
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(harness.sdk.callsTo("threads.stop")).toEqual([[{ threadId: "thread-advisor" }]]);
+    expect(harness.sdk.callsTo("threads.interactions.resolve")).toHaveLength(0);
+  });
+
+  it("does not reuse a reviewer when its interactions cannot be checked", async () => {
+    const { bb, harness, spawn } = await loadAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("providers.models", async () => NEGOTIABLE_CATALOG);
+    let firstCheck = true;
+    harness.sdk.stub("threads.interactions.list", async () => {
+      if (firstCheck) { firstCheck = false; throw new Error("unavailable"); }
+      return [];
+    });
+    seedSession(bb, "accept-edits");
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review after a lookup failure." }, { threadId: "thread-primary" });
+    expect(result).toContain("Advisor blocker");
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 
   it("respawns a reviewer stored under a mode this bb no longer negotiates", async () => {
