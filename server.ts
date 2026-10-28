@@ -2413,12 +2413,6 @@ export default async function plugin(bb: BbPluginApi) {
         timeoutMs,
         ...(signal ? { signal } : {}),
       });
-      const interactions = await bb.sdk.threads.interactions.list({ threadId: advisorThreadId });
-      if (interactions.some((item) => item.status === "pending" || item.status === "resolving")) {
-        blockedByInteraction = true;
-        db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
-          .run(primaryThreadId, advisorThreadId);
-      }
     } catch (error) {
       await stopAdvisor().catch(() => undefined);
       // A timeout is self-describing; the exception name and the reviewer's
@@ -2437,7 +2431,19 @@ export default async function plugin(bb: BbPluginApi) {
       clearTimeout(finalizeTimer);
       signal?.removeEventListener("abort", onAbort);
     }
+    if (!blockedByInteraction) {
+      try {
+        const interactions = await bb.sdk.threads.interactions.list({ threadId: advisorThreadId });
+        blockedByInteraction = interactions.some((item) => item.status === "pending" || item.status === "resolving");
+      } catch (error) {
+        db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
+          .run(primaryThreadId, advisorThreadId);
+        return unavailable(`could not confirm the reviewer was unblocked (${describeError(error)})`);
+      }
+    }
     if (blockedByInteraction) {
+      db.prepare("DELETE FROM advisor_sessions WHERE primary_thread_id = ? AND advisor_thread_id = ?")
+        .run(primaryThreadId, advisorThreadId);
       await stopAdvisor().catch(() => undefined);
       return unavailable(BLOCKED_REASON);
     }

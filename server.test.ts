@@ -1392,6 +1392,15 @@ describe("advisor session environment binding", () => {
     expect(harness.sdk.callsTo("threads.stop")).toHaveLength(2);
   }, 10000);
 
+  it("reports a failed post-review interaction check without calling it a timeout", async () => {
+    const { harness } = await loadAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("threads.interactions.list", async () => { throw new Error("interaction service unavailable"); });
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review with failed interaction lookup." }, { threadId: "thread-primary" });
+    expect(result).toContain("could not confirm");
+    expect(result).not.toContain("did not finish within");
+    expect(harness.sdk.callsTo("threads.output")).toHaveLength(0);
+  });
+
   it("does not accept stale output when the reviewer goes idle with a prompt", async () => {
     const { harness } = await loadAdvisor(BLOCKER_OUTPUT);
     harness.sdk.stub("threads.interactions.list", async () => [{ id: "blocked", status: "pending", payload: { kind: "approval" } }]);
