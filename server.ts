@@ -2519,7 +2519,7 @@ export default async function plugin(bb: BbPluginApi) {
       ? ambiguousRetryFinding(output)
       : parseAdvisorOutput(reviewOutput);
     if (missingReviewOutput && !review) {
-      return unavailable("the retry did not return a complete ADVISOR_RESULT block or returned ambiguous fields; essential evidence could not be confirmed");
+      return unavailable("the retry did not return a complete ADVISOR_RESULT block or returned ambiguous fields; essential evidence could not be confirmed and the reply may contain unresolved findings; treat existing findings as still open and the review as incomplete");
     }
     if (!review) {
       // Prose with no verdict is not a finding. Fabricating a `concern` here

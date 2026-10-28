@@ -1554,6 +1554,31 @@ describe("advisor session environment binding", () => {
     expect(reviews.reviews.find((review) => review.summary === "Old defect")?.closedAt).toBeNull();
   });
 
+  it("warns of unresolved findings without exposing or inventing a conflicting verdict", async () => {
+    const { harness, setTimelineSeq, setAdvisorOutput } = await loadAdvisor(`ADVISOR_RESULT\nseverity: concern\nkey: old-defect\nsummary: Old defect\ndetails:\n- Verify the old defect.\nresolved: none\nEND_ADVISOR_RESULT`);
+    let retryChecks = 0;
+    let blockingRetry = false;
+    harness.sdk.stub("threads.interactions.list", async () => blockingRetry && ++retryChecks === 2 ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+    await harness.callAgentTool("advisor_review", { focus: "First review." }, { threadId: "thread-primary" });
+    setTimelineSeq(43);
+    setAdvisorOutput(`ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nseverity: blocker\nsummary: private-token-fixture\nresolved: old-defect\nEND_ADVISOR_RESULT`);
+    blockingRetry = true;
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Retry review." }, { threadId: "thread-primary" });
+    const reviews = (await harness.callRpc("threadReviews", { threadId: "thread-primary" })) as { reviews: { summary: string; closedAt: number | null }[] };
+    const badge = (await harness.callRpc("threadBadge", { threadId: "thread-primary" })) as { latestUnavailableReason: string };
+
+    expect(result).toContain("Advisor unavailable");
+    expect(result).toContain("may contain unresolved findings");
+    expect(result).toContain("treat existing findings as still open and the review as incomplete");
+    expect(result).not.toContain("Advisor blocker");
+    expect(result).not.toContain("private-token-fixture");
+    expect(badge.latestUnavailableReason).toContain("may contain unresolved findings");
+    expect(badge.latestUnavailableReason).not.toContain("private-token-fixture");
+    expect(reviews.reviews.find((review) => review.summary === "Old defect")?.closedAt).toBeNull();
+    expect(reviews.reviews).toHaveLength(1);
+  });
+
   it("does not expose a sensitive reviewer reply in an ambiguous incident", async () => {
     const { harness } = await loadAdvisor(`ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: private-token-fixture\nsummary: ambiguous\nEND_ADVISOR_RESULT`);
     let spawned = 0;
