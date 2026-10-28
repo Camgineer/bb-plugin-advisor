@@ -1561,6 +1561,64 @@ describe("advisor unavailability", () => {
 });
 
 describe("post-turn review scope", () => {
+  it("reports a bounded queue wait without starting the next review", async () => {
+    vi.useFakeTimers();
+    try {
+      const { harness, setTimelineSeq } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+      await harness.setSettings({ timeoutSeconds: "30 seconds" });
+      let release = () => {};
+      harness.sdk.stub("threads.wait", async () => {
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { matched: true };
+      });
+      const first = harness.emitThreadEvent("thread.idle", {
+        thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+        lastAssistantText: "First turn completed.",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      setTimelineSeq(43);
+      const second = harness.callAgentTool("advisor_review", { focus: "Later turn" }, { threadId: "thread-primary" });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await second).toContain("timed out waiting for a previous review");
+      expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1);
+      release();
+      await first;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("creates a new reviewer after a stop failure", async () => {
+    const { harness, spawn, setTimelineSeq } = await loadAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("threads.wait", async () => { throw new Error("timed out"); });
+    harness.sdk.stub("threads.stop", async () => { throw new Error("stop failed"); });
+    const first = await harness.callAgentTool("advisor_review", { focus: "First" }, { threadId: "thread-primary" });
+    expect(first).toContain("Advisor unavailable");
+    setTimelineSeq(43);
+    harness.sdk.stub("threads.wait", async () => ({ matched: true }));
+    const second = await harness.callAgentTool("advisor_review", { focus: "Second" }, { threadId: "thread-primary" });
+    expect(second).toContain("Advisor blocker");
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send a review until a stopping reviewer becomes idle", async () => {
+    const { harness, setTimelineSeq } = await loadAdvisor(BLOCKER_OUTPUT);
+    await harness.callAgentTool("advisor_review", { focus: "First" }, { threadId: "thread-primary" });
+    setTimelineSeq(43);
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      makeThreadResponse({ id: threadId, status: threadId === "thread-advisor" ? "stopping" : "idle", projectId: "project-test", environmentId: "environment-test", providerId: "codex" }));
+    let release = () => {};
+    let calls = 0;
+    harness.sdk.stub("threads.wait", async () => {
+      if (++calls === 1) await new Promise<void>((resolve) => { release = resolve; });
+      return { matched: true };
+    });
+    const second = harness.callAgentTool("advisor_review", { focus: "Second" }, { threadId: "thread-primary" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(0);
+    release();
+    expect(await second).toContain("still unresolved");
+    expect(harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
   it("waits for an in-flight stop when cancellation races with completion", async () => {
     const { harness } = await loadAdvisor(BLOCKER_OUTPUT);
     const controller = new AbortController();
