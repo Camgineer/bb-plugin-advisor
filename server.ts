@@ -614,10 +614,15 @@ function retryResultBlock(output: string): string | null {
   const missingBlock = block === undefined;
   if (missingBlock) return null;
 
-  const evidenceFields = Array.from(block.matchAll(/^[ \t]*evidence[ \t]*:/gim));
-  const severityFields = Array.from(block.matchAll(/^[ \t]*severity[ \t]*:/gim));
-  const duplicateFields = evidenceFields.length > 1 || severityFields.length > 1;
+  const fields = Array.from(
+    block.matchAll(/^[ \t]*(?:evidence|severity|key|summary|resolved)[ \t]*:/gim),
+    (match) => match[0].replace(/[ \t:]/g, "").toLowerCase(),
+  );
+  const duplicateFields = new Set(fields).size !== fields.length;
   if (duplicateFields) return null;
+
+  const missingSeverity = !/^[ \t]*severity[ \t]*:[ \t]*(?:pass|nit|concern|blocker)[ \t]*\r?$/im.test(block);
+  if (missingSeverity) return null;
 
   return block;
 }
@@ -2506,7 +2511,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
     }
     if (permissionRetry) {
-      const evidence = reviewOutput.match(/^\s*evidence\s*:\s*(sufficient|unavailable)\s*$/im)?.[1]?.toLowerCase();
+      const evidence = reviewOutput.match(/^[ \t]*evidence[ \t]*:[ \t]*(sufficient|unavailable)[ \t]*\r?$/im)?.[1]?.toLowerCase();
       const evidenceUnconfirmed = evidence !== "sufficient";
       if (evidenceUnconfirmed) {
         const passed = review.severity === "pass";

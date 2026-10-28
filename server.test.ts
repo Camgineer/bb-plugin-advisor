@@ -1504,6 +1504,11 @@ describe("advisor session environment binding", () => {
     ["duplicate result endings", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed\nEND_ADVISOR_RESULT\nEND_ADVISOR_RESULT`],
     ["conflicting evidence fields", `ADVISOR_RESULT\nevidence: sufficient\nevidence: unavailable\nseverity: pass\nsummary: Cannot inspect\nEND_ADVISOR_RESULT`],
     ["conflicting severity fields", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nseverity: concern\nsummary: Unapproved write\nEND_ADVISOR_RESULT`],
+    ["conflicting key fields", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nkey: none\nkey: defect\nsummary: Reviewed\nEND_ADVISOR_RESULT`],
+    ["conflicting summary fields", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed\nsummary: Cannot inspect\nEND_ADVISOR_RESULT`],
+    ["conflicting resolved fields", `ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed\nresolved: defect\nresolved: none\nEND_ADVISOR_RESULT`],
+    ["a multiline evidence field", `ADVISOR_RESULT\nevidence:\nsufficient\nseverity: pass\nsummary: Reviewed\nEND_ADVISOR_RESULT`],
+    ["a multiline severity field", `ADVISOR_RESULT\nevidence: sufficient\nseverity:\npass\nsummary: Reviewed\nEND_ADVISOR_RESULT`],
     ["out-of-order result markers", `END_ADVISOR_RESULT\nADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed`],
   ])("does not approve a retry with %s", async (_description, output) => {
     const { harness } = await loadAdvisor(output);
@@ -1514,6 +1519,23 @@ describe("advisor session environment binding", () => {
     const result = await harness.callAgentTool("advisor_review", { focus: "Review the change." }, { threadId: "thread-primary" });
 
     expect(result).toContain("Advisor unavailable");
+  });
+
+  it("does not close an open finding from conflicting retry fields", async () => {
+    const { harness, setTimelineSeq, setAdvisorOutput } = await loadAdvisor(`ADVISOR_RESULT\nseverity: concern\nkey: defect\nsummary: A defect remains\ndetails:\n- Verify the defect.\nresolved: none\nEND_ADVISOR_RESULT`);
+    let retryChecks = 0;
+    let blockingRetry = false;
+    harness.sdk.stub("threads.interactions.list", async () => blockingRetry && ++retryChecks === 2 ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+    await harness.callAgentTool("advisor_review", { focus: "First review." }, { threadId: "thread-primary" });
+    setTimelineSeq(43);
+    setAdvisorOutput(`ADVISOR_RESULT\nevidence: sufficient\nseverity: pass\nsummary: Reviewed\nresolved: defect\nresolved: none\nEND_ADVISOR_RESULT`);
+    blockingRetry = true;
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Retry review." }, { threadId: "thread-primary" });
+    const badge = (await harness.callRpc("threadBadge", { threadId: "thread-primary" })) as { open: unknown };
+
+    expect(result).toContain("Advisor unavailable");
+    expect(badge.open).not.toBeNull();
   });
 
   it("does not approve a retry that omits the evidence status", async () => {
