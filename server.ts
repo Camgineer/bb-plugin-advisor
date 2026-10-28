@@ -2493,7 +2493,8 @@ export default async function plugin(bb: BbPluginApi) {
     // means the primary agent was already told and has not resolved it, which
     // is the case where downgrading to a pass is most harmful.
     const reviewOutput = permissionRetry ? retryResultBlock(output) : output;
-    if (!reviewOutput) {
+    const missingReviewOutput = reviewOutput === null;
+    if (missingReviewOutput) {
       return unavailable("the retry did not return a complete ADVISOR_RESULT block");
     }
     const review = parseAdvisorOutput(reviewOutput);
@@ -2506,8 +2507,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (permissionRetry) {
       const evidence = reviewOutput.match(/^\s*evidence\s*:\s*(sufficient|unavailable)\s*$/im)?.[1]?.toLowerCase();
-      if (evidence !== "sufficient") {
-        if (review.severity === "pass") {
+      const evidenceUnconfirmed = evidence !== "sufficient";
+      if (evidenceUnconfirmed) {
+        const passed = review.severity === "pass";
+        if (passed) {
           return unavailable(`essential evidence could not be confirmed after a permission request (${output.trim().slice(0, 1000)})`);
         }
         review.details = `Essential evidence could not be confirmed after a permission request.\n\n${review.details}`;
