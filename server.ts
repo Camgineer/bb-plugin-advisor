@@ -40,6 +40,7 @@ type AdvisorPermissionMode = NonNullable<
   Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0]["permissionMode"]
 >;
 /** Advice about a turn this old is stale; it is retired instead of sent. */
+const REVIEW_EXCERPT_MAX_CHARS = 1000;
 const PENDING_ADVICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BLOCKED_REASON = "the reviewer requested permission and was stopped without granting it; the next review will use a fresh session";
 const CANCELLED_REASON =
@@ -2500,7 +2501,7 @@ export default async function plugin(bb: BbPluginApi) {
     const reviewOutput = permissionRetry ? retryResultBlock(output) : output;
     const missingReviewOutput = reviewOutput === null;
     if (missingReviewOutput) {
-      return unavailable("the retry did not return a complete ADVISOR_RESULT block");
+      return unavailable(`the retry did not return a complete ADVISOR_RESULT block or returned ambiguous fields; reviewer reply excerpt (first ${REVIEW_EXCERPT_MAX_CHARS} characters): ${output.trim().slice(0, REVIEW_EXCERPT_MAX_CHARS)}`);
     }
     const review = parseAdvisorOutput(reviewOutput);
     if (!review) {
@@ -2516,7 +2517,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (evidenceUnconfirmed) {
         const passed = review.severity === "pass";
         if (passed) {
-          return unavailable(`essential evidence could not be confirmed after a permission request (${output.trim().slice(0, 1000)})`);
+          return unavailable(`essential evidence could not be confirmed after a permission request (${output.trim().slice(0, REVIEW_EXCERPT_MAX_CHARS)})`);
         }
         review.details = `Essential evidence could not be confirmed after a permission request.\n\n${review.details}`;
         review.resolvedKeys = [];

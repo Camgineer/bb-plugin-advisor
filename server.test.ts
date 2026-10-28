@@ -1521,6 +1521,21 @@ describe("advisor session environment binding", () => {
     expect(result).toContain("Advisor unavailable");
   });
 
+  it("surfaces a blocker in an ambiguous retry without approving it", async () => {
+    const reviewerReply = `ADVISOR_RESULT\nevidence: sufficient\nseverity: blocker\nsummary: Unapproved write found\nsummary: Check the write\ndetails:\n- The timeline shows an unapproved write.\nEND_ADVISOR_RESULT`;
+    const { harness } = await loadAdvisor(reviewerReply);
+    let spawned = 0;
+    harness.sdk.stub("threads.spawn", async () => makeThreadResponse({ id: `reviewer-${++spawned}`, status: "active" }));
+    harness.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => threadId === "reviewer-1" ? [{ id: "blocked", status: "pending", payload: { kind: "approval" } }] : []);
+
+    const result = await harness.callAgentTool("advisor_review", { focus: "Review the write." }, { threadId: "thread-primary" });
+
+    expect(result).toContain("Advisor unavailable");
+    expect(result).toContain("severity: blocker");
+    expect(result).toContain("Unapproved write found");
+    expect(result).toContain(reviewerReply);
+  });
+
   it("does not close an open finding from conflicting retry fields", async () => {
     const { harness, setTimelineSeq, setAdvisorOutput } = await loadAdvisor(`ADVISOR_RESULT\nseverity: concern\nkey: defect\nsummary: A defect remains\ndetails:\n- Verify the defect.\nresolved: none\nEND_ADVISOR_RESULT`);
     let retryChecks = 0;
