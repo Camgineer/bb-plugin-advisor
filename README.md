@@ -60,7 +60,8 @@ Advisor reviews a thread through three complementary paths:
    and returns concrete findings the agent must address before completing.
 2. **Post-turn review** — after a primary thread goes idle with a completed
    public answer, the reviewer checks that answer and the work it claims.
-   Actionable late findings are sent to the agent when its next turn starts.
+   Advisor steers actionable late findings into an active turn. If the thread
+   is idle, the auto-continue setting controls whether Advisor starts a turn.
    A turn that already ran the tool is not reviewed again after it goes idle.
 3. **Review now** — the thread panel can start the same review on demand. If
    the agent is still working, Advisor waits for the completed public answer
@@ -70,13 +71,15 @@ The thread header advertises the review lifecycle independently from the agent
 turn: **Waiting for completed turn**, **Review pending**, **Approved**,
 **Changes requested**, or **Review unavailable**.
 
-A late finding stays attached to the completed turn and offers **Fix in new
-turn**, which starts an agent-only corrective follow-up with the finding
-already in context. Unresolved findings are also sent into the turn your next
-message starts, as an agent-only Advisor message. If that turn finishes before
-the agent reads the message, the agent picks it up in a short follow-up turn.
-When more than one finding is queued, Advisor carries the whole bounded queue
-into that turn — delivering one finding never silently consumes its siblings.
+A late finding stays attached to the completed turn. **Fix in new turn**
+sends the finding to the agent as an agent-only message. If a turn is active,
+the message steers that turn. If the thread is idle, the message starts a turn.
+Advisor also sends queued findings when a new turn starts. If a turn ends just
+before a steer is sent, the message can start a follow-up turn. When an
+interaction blocks delivery, BB queues the message until the interaction clears.
+
+Advisor sends only findings at or above the minimum severity. It carries a
+bounded queue into a new turn without consuming findings outside that message.
 Advice older than 24 hours is retired rather than sent stale.
 
 ## Install
@@ -104,7 +107,7 @@ All settings live in **Settings → Extensions → Advisor**.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Enable advisor | on | Requires an independent review before an agent completes substantial work. |
-| Review completed turns | on | Post-turn review; late findings carry into the next turn. |
+| Review completed turns | on | Review completed turns and send actionable late findings. |
 | Auto-continue on late findings | **off** | See below. |
 | Fallback advisor reasoning | inherit | Used only when a machine follows the primary model. |
 | Minimum severity | nit | Findings below the threshold are not delivered to the agent. |
@@ -177,10 +180,13 @@ inconclusive, so a transient outage does not disable reviews.
 
 ### Auto-continue on late findings (off by default)
 
-When enabled, Advisor starts the **Fix in new turn** follow-up without a
-click: one corrective turn for a newly raised finding chain. It is idempotent
-per review round and can fire only once per finding chain, so a persistent
-finding cannot create an unattended review loop.
+Advisor steers an active turn when a late finding arrives, regardless of this
+setting. When the thread is idle, enabling this setting starts a corrective
+turn automatically. With the setting off, the finding waits for a new turn or
+an explicit **Fix in new turn** request.
+
+Automatic idle follow-ups are limited to once per finding chain. Advisor can
+steer a later active turn with a repeated finding.
 
 ### Project reviewer policy
 
@@ -198,9 +204,9 @@ stateDiagram-v2
     direction LR
     state "Re-raised" as Reraised
     [*] --> Queued : advisor raises a finding
-    Queued --> Sent : tool result or next-turn injection
+    Queued --> Sent : tool result or BB accepts Advisor message
     Sent --> Reraised : flagged again
-    Reraised --> Sent : held at strongest severity
+    Reraised --> Sent : tool result or BB accepts Advisor message
     Sent --> Closed : advisor re-checks and closes
     Closed --> Reraised : same key returns
     Sent --> Decided : user rules not an issue or won't fix
@@ -210,11 +216,10 @@ stateDiagram-v2
 
 Every finding carries its own lifecycle, shown in the thread panel:
 
-- **Queued** — found, but its text has not reached the primary agent yet.
-- **Sent to the agent** — set at the two moments the finding is actually
-  handed over: the tool result, and the Advisor message sent into the next
-  turn. *Sent is not resolved* — it only means the agent has seen the
-  text.
+- **Queued** — found and waiting for Advisor to send it to BB.
+- **Sent to the agent** — set when the tool returns the finding or BB accepts
+  an Advisor message. BB may queue the message before the agent receives it.
+  Sent does not mean the finding is resolved.
 - **Re-raised N×** — the advisor flagged it again, so it demonstrably was not
   addressed.
 - **Advisor re-checked and closed it** — the reviewer is shown its own open

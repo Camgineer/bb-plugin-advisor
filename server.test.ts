@@ -1028,11 +1028,11 @@ describe("late-finding continuation", () => {
       );
     expect(primarySends).toHaveLength(1);
     expect(primarySends[0]?.[0]).toMatchObject({
-      mode: "queue-if-active",
+      mode: "steer-if-active",
       input: [
         expect.objectContaining({
           visibility: "agent-only",
-          text: expect.stringContaining("requested changes"),
+          text: expect.stringContaining("timeline through sequence 42"),
         }),
       ],
     });
@@ -1042,9 +1042,149 @@ describe("late-finding continuation", () => {
     expect(pending.advice).toBeNull();
   });
 
-  it("auto-continues at most once for a persistent finding chain", async () => {
+  it("steers a late finding into an active turn without delivering it again on the active event", async () => {
+    const { harness } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    await harness.setSettings({ autoContinue: true });
+    const active = makeThreadResponse({ id: "thread-primary", visibility: "visible", status: "active" });
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      threadId === "thread-primary" ? active : idleThread({ threadId }),
+    );
+    let releaseSend!: () => void;
+    let sendStarted!: () => void;
+    const sending = new Promise<void>((resolve) => { sendStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseSend = resolve; });
+    harness.sdk.stub("threads.send", async ({ threadId }: { threadId: string }) => {
+      if (threadId === "thread-primary") {
+        sendStarted();
+        await release;
+      }
+      return { ok: true };
+    });
+
+    const review = harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "Done.",
+    });
+    await sending;
+    const activeEvent = harness.emitThreadEvent("thread.active", { thread: active });
+    releaseSend();
+    await Promise.all([review, activeEvent]);
+
+    const sends = harness.sdk.callsTo("threads.send").filter(
+      ([call]) => (call as { threadId: string }).threadId === "thread-primary",
+    );
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.[0]).toMatchObject({
+      mode: "steer-if-active",
+      input: [expect.objectContaining({
+        visibility: "agent-only",
+        text: expect.stringMatching(/sequence 42[\s\S]*Inspect the current state[\s\S]*resume your current task/),
+      })],
+    });
+    const pending = await harness.callRpc("pendingAdvice", { threadId: "thread-primary" }) as { advice: unknown };
+    expect(pending.advice).toBeNull();
+  });
+
+  it("does not send a finding already returned by the review tool while checking thread status", async () => {
+    const { harness } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    let releaseStatus!: () => void;
+    let statusStarted!: () => void;
+    const statusCheck = new Promise<void>((resolve) => { statusStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseStatus = resolve; });
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId === "thread-primary") {
+        const pending = await harness.callRpc("pendingAdvice", { threadId }) as { advice: unknown };
+        if (pending.advice) {
+          statusStarted();
+          await release;
+          return makeThreadResponse({ id: threadId, visibility: "visible", status: "active" });
+        }
+      }
+      return idleThread({ threadId });
+    });
+
+    const automaticReview = harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "Done.",
+    });
+    await statusCheck;
+    const toolResult = await harness.callAgentTool(
+      "advisor_review",
+      { focus: "Review the same work." },
+      { threadId: "thread-primary" },
+    );
+    releaseStatus();
+    await automaticReview;
+
+    expect(toolResult).toContain("The claimed test did not run");
+    const sends = harness.sdk.callsTo("threads.send").filter(
+      ([call]) => (call as { threadId: string }).threadId === "thread-primary",
+    );
+    expect(sends).toHaveLength(0);
+    const pending = await harness.callRpc("pendingAdvice", { threadId: "thread-primary" }) as { advice: unknown };
+    expect(pending.advice).toBeNull();
+  });
+
+  it("steers an active turn even when idle auto-continuation is disabled", async () => {
+    const { harness } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      threadId === "thread-primary"
+        ? makeThreadResponse({ id: threadId, visibility: "visible", status: "active" })
+        : idleThread({ threadId }),
+    );
+
+    await harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "Done.",
+    });
+
+    const sends = harness.sdk.callsTo("threads.send").filter(
+      ([call]) => (call as { threadId: string }).threadId === "thread-primary",
+    );
+    expect(sends).toHaveLength(1);
+    expect(sends[0]?.[0]).toMatchObject({ mode: "steer-if-active" });
+  });
+
+  it("hands a finding to BB when an interaction defers delivery", async () => {
+    const { harness } = await loadAutoAdvisor(BLOCKER_OUTPUT);
+    await harness.setSettings({ autoContinue: true });
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      threadId === "thread-primary"
+        ? makeThreadResponse({ id: threadId, visibility: "visible", status: "active" })
+        : idleThread({ threadId }),
+    );
+    harness.sdk.stub("threads.send", async ({ threadId }: { threadId: string }) =>
+      threadId === "thread-primary"
+        ? { ok: true, delivery: "queued", queuedMessage: { id: "waiting-for-interaction" } }
+        : { ok: true, delivery: "sent" },
+    );
+
+    await harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "Done.",
+    });
+    await startTurn(harness);
+
+    const primarySends = harness.sdk.callsTo("threads.send").filter(
+      ([call]) => (call as { threadId: string }).threadId === "thread-primary",
+    );
+    expect(primarySends).toHaveLength(1);
+    expect(primarySends[0]?.[0]).toMatchObject({ mode: "steer-if-active" });
+    const pending = await harness.callRpc("pendingAdvice", { threadId: "thread-primary" }) as { advice: unknown };
+    expect(pending.advice).toBeNull();
+  });
+
+  it.each([
+    { status: "active", expectedSends: 2 },
+    { status: "idle", expectedSends: 1 },
+  ] as const)("delivers repeated findings when $status without an idle continuation loop", async ({ status, expectedSends }) => {
     const { harness, setTimelineSeq } = await loadAutoAdvisor(BLOCKER_OUTPUT);
     await harness.setSettings({ autoContinue: true });
+    harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      threadId === "thread-primary"
+        ? makeThreadResponse({ id: threadId, visibility: "visible", status })
+        : idleThread({ threadId }),
+    );
 
     const idle = () =>
       harness.emitThreadEvent("thread.idle", {
@@ -1064,13 +1204,13 @@ describe("late-finding continuation", () => {
         ([call]) =>
           (call as { threadId: string }).threadId === "thread-primary",
       );
-    expect(primarySends).toHaveLength(1);
+    expect(primarySends).toHaveLength(expectedSends);
   });
 });
 
 describe("pending finding queue", () => {
   const finding = (
-    severity: "concern" | "blocker",
+    severity: "nit" | "concern" | "blocker",
     key: string,
     summary: string,
   ) => `ADVISOR_RESULT
@@ -1081,6 +1221,23 @@ details:
 - Correct ${key}.
 resolved: none
 END_ADVISOR_RESULT`;
+
+  it("does not send a queued nit at turn start when the threshold is concern", async () => {
+    const { harness } = await loadAutoAdvisor(finding("nit", "minor-issue", "A minor issue"));
+    await harness.setSettings({ severityThreshold: "concern" });
+    await harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-primary", visibility: "visible" }),
+      lastAssistantText: "Done.",
+    });
+
+    const briefing = await startTurn(harness);
+    const pending = await harness.callRpc("pendingAdvice", { threadId: "thread-primary" }) as { advice: unknown };
+
+    expect(briefing).toBeNull();
+    expect(pending.advice).not.toBeNull();
+    await harness.setSettings({ severityThreshold: "nit" });
+    expect(await startTurn(harness)).toContain("A minor issue");
+  });
 
   it("carries every queued finding into the next turn and marks each sent", async () => {
     const { harness, setTimelineSeq, setAdvisorOutput } = await loadAutoAdvisor(

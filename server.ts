@@ -557,7 +557,7 @@ function formatOutcome(outcome: AdvisorOutcome): string {
 }
 
 /** The message that brings a running agent up to date with Advisor. */
-function turnBriefing(tellPolicy: boolean, findings: readonly AdvisorFinding[]): string {
+function turnBriefing(tellPolicy: boolean, findings: readonly ReviewRow[]): string {
   const parts: string[] = [];
   if (tellPolicy) {
     parts.push(
@@ -567,8 +567,8 @@ function turnBriefing(tellPolicy: boolean, findings: readonly AdvisorFinding[]):
   if (findings.length > 0) {
     parts.push(
       `A late independent review queue from previous turns contains:\n${findings
-        .map(formatReview)
-        .join("\n\n")}\nAddress every finding above before proceeding.`,
+        .map((row) => `Reviewed through timeline sequence ${row.source_seq}:\n${formatReview(rowToReview(row))}`)
+        .join("\n\n")}\nInspect the current state. Fix valid findings within the current scope and verify the changes. Explain any finding you reject, then resume your current task.`,
     );
   }
   return parts.join("\n\n");
@@ -1407,6 +1407,20 @@ export default async function plugin(bb: BbPluginApi) {
     return "unreviewed" as const;
   }
 
+  const deliveryTails = new Map<string, Promise<void>>();
+
+  async function serializeDelivery<T>(threadId: string, deliver: () => Promise<T>): Promise<T> {
+    const previous = deliveryTails.get(threadId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(deliver);
+    const tail = next.then(() => undefined, () => undefined);
+    deliveryTails.set(threadId, tail);
+    try {
+      return await next;
+    } finally {
+      if (deliveryTails.get(threadId) === tail) deliveryTails.delete(threadId);
+    }
+  }
+
   async function continueWithFinding(
     primaryThreadId: string,
     reviewId: number,
@@ -1467,14 +1481,14 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       await bb.sdk.threads.send({
         threadId: primaryThreadId,
-        mode: "queue-if-active",
+        mode: "steer-if-active",
         input: [
           {
             type: "text",
             visibility: "agent-only",
             text:
-              `A completed-turn Advisor review requested changes:\n${formatReview(rowToReview(review))}\n` +
-              "Address this now. Inspect the current state, make the correction, verify it, then run advisor_review before finalizing.",
+              `Advisor reviewed the primary timeline through sequence ${review.source_seq}:\n${formatReview(rowToReview(review))}\n` +
+              "Inspect the current state. Fix valid findings within the current scope and verify the changes. Explain any finding you reject, then resume your current task.",
             mentions: [],
           },
         ],
@@ -1765,7 +1779,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async continueFinding({ threadId, reviewId }) {
-      const reason = await continueWithFinding(threadId, reviewId, false);
+      const reason = await serializeDelivery(threadId, () => continueWithFinding(threadId, reviewId, false));
       return { started: reason === "started", reason };
     },
 
@@ -2659,16 +2673,22 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     publishThreadChanged(primaryThreadId);
-    // A review can finish after the thread was switched off. Explicit review
-    // and fix requests still work, but automatic continuation must re-check.
-    if (currentSettings.autoContinue && advisorEnabledFor(primaryThreadId)) {
-      try {
-        await continueWithFinding(primaryThreadId, row.id, true);
-      } catch (error) {
-        bb.log.error(
-          `Automatic Advisor continuation failed for ${primaryThreadId}: ${describeError(error)}`,
-        );
-      }
+    if (!advisorEnabledFor(primaryThreadId)) return;
+
+    try {
+      await serializeDelivery(primaryThreadId, async () => {
+        const pending = readPendingAdvice(primaryThreadId).find((candidate) => candidate.id === row.id);
+        if (!pending || !advisorEnabledFor(primaryThreadId)) return;
+        const thread = await bb.sdk.threads.get({ threadId: primaryThreadId });
+        const stillPending = readPendingAdvice(primaryThreadId).some((candidate) => candidate.id === row.id);
+        if (!stillPending || !advisorEnabledFor(primaryThreadId)) return;
+        if (thread.status !== "active" && (thread.status !== "idle" || !currentSettings.autoContinue)) return;
+        await continueWithFinding(primaryThreadId, row.id, thread.status === "idle");
+      });
+    } catch (error) {
+      bb.log.error(
+        `Automatic Advisor delivery failed for ${primaryThreadId}: ${describeError(error)}`,
+      );
     }
   }
 
@@ -2733,33 +2753,32 @@ export default async function plugin(bb: BbPluginApi) {
     ) {
       return;
     }
-    const tellPolicy = policyBriefingDue(thread.id);
-    const findings = readPendingAdvice(thread.id).slice(0, MAX_PENDING_ADVICE_PER_TURN);
-    if (!tellPolicy && findings.length === 0) return;
-
     briefingThreads.add(thread.id);
     try {
-      // A steer to a thread whose turn already ended would start a new turn
-      // rather than join this one.
-      const current = await bb.sdk.threads.get({ threadId: thread.id });
-      if (current.status !== "active") return;
-      await bb.sdk.threads.send({
-        threadId: thread.id,
-        mode: "steer",
-        input: [
-          {
+      await serializeDelivery(thread.id, async () => {
+        const tellPolicy = policyBriefingDue(thread.id);
+        const findings = readPendingAdvice(thread.id)
+          .filter((row) => meetsThreshold(row.severity, currentSettings.severityThreshold))
+          .slice(0, MAX_PENDING_ADVICE_PER_TURN);
+        if (!tellPolicy && findings.length === 0) return;
+        const current = await bb.sdk.threads.get({ threadId: thread.id });
+        if (current.status !== "active") return;
+        await bb.sdk.threads.send({
+          threadId: thread.id,
+          mode: "steer",
+          input: [{
             type: "text",
             visibility: "agent-only",
-            text: turnBriefing(tellPolicy, findings.map(rowToReview)),
+            text: turnBriefing(tellPolicy, findings),
             mentions: [],
-          },
-        ],
+          }],
+        });
+        db.transaction(() => {
+          for (const row of findings) markReviewDelivered(row.id, true);
+          if (tellPolicy) recordPolicyTold(thread.id);
+        })();
+        if (findings.length > 0) publishThreadChanged(thread.id);
       });
-      db.transaction(() => {
-        for (const row of findings) markReviewDelivered(row.id, true);
-        if (tellPolicy) recordPolicyTold(thread.id);
-      })();
-      if (findings.length > 0) publishThreadChanged(thread.id);
     } catch (error) {
       bb.log.warn(`Advisor could not brief the running turn of ${thread.id}: ${describeError(error)}`);
     } finally {
