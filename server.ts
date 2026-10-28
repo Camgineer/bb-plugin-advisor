@@ -613,6 +613,7 @@ function buildAdvisorPrompt(args: {
   timeoutSeconds: number;
   openFindings: readonly { key: string; summary: string }[];
   openFindingsTruncated: boolean;
+  permissionRetry: boolean;
 }): string {
   const budget = reviewBudget(args.timeoutSeconds);
   return `You are the independent advisor for bb coding thread ${args.primaryThreadId}.
@@ -636,6 +637,9 @@ Review budget:
 - Perform at most ${budget.maxInspectionActions} read-only inspection or command actions. Prefer native file-reading tools and supplied evidence; avoid network requests and commands requiring permission. Do not rerun broad test suites or builds—the primary agent already owns verification.
 - Never edit files or perform external actions. If essential evidence is unavailable, state the missing evidence and do not claim it was verified.
 - If exhaustive verification would exceed the budget, report the strongest concrete issue you can support, or pass when you found none. Never omit the result format.
+${args.permissionRetry ? `
+The previous attempt stopped at a permission request. Use the supplied timeline and native file reads. For local inspection, use a working directory instead of a compound cd command; avoid network requests. Do not request permission or bypass the restriction. If essential evidence remains inaccessible, set evidence to unavailable and name the missing evidence in details. Otherwise set evidence to sufficient.
+` : ""}
 
 Findings you raised earlier on this thread that are still open:
 ${
@@ -660,7 +664,7 @@ ${args.transcript}
 Return exactly one result in this format. Use pass and silence-equivalent details when there is no actionable issue. Do not repeat old advice merely to have something to say.
 
 ADVISOR_RESULT
-severity: pass|nit|concern|blocker
+${args.permissionRetry ? "evidence: sufficient|unavailable\n" : ""}severity: pass|nit|concern|blocker
 key: a short stable slug naming the defect itself, anchored to where it lives, e.g. server-ts-runreview-timeout-untested. Use the SAME key whenever you raise the same underlying defect again, even if you reword it or rate it differently. Use "none" for a pass.
 summary: one concise line
 details:
@@ -2288,6 +2292,7 @@ export default async function plugin(bb: BbPluginApi) {
     timeline: { rows: readonly object[]; maxSeq: number },
     signal: AbortSignal | undefined,
     reportBlocked = true,
+    permissionRetry = false,
   ): Promise<AdvisorOutcome> {
     // Every non-review exit goes through here, so a failure is always recorded
     // as an incident and can never be silently absent from the panel.
@@ -2327,6 +2332,7 @@ export default async function plugin(bb: BbPluginApi) {
           summary: finding.summary,
         })),
       openFindingsTruncated: openFindings.length > MAX_PROMPTED_OPEN_FINDINGS,
+      permissionRetry,
     });
     let advisor: { id: string; startedWithPrompt: boolean };
     try {
@@ -2476,6 +2482,16 @@ export default async function plugin(bb: BbPluginApi) {
         `the reviewer's reply carried no verdict (${output.trim().slice(0, 160)})`,
       );
     }
+    if (permissionRetry) {
+      const evidence = output.match(/^\s*evidence\s*:\s*(sufficient|unavailable)\s*$/im)?.[1]?.toLowerCase();
+      if (evidence !== "sufficient") {
+        if (review.severity === "pass") {
+          return unavailable(`essential evidence could not be confirmed after a permission request (${output.trim().slice(0, 1000)})`);
+        }
+        review.details = `Essential evidence could not be confirmed after a permission request.\n\n${review.details}`;
+        review.resolvedKeys = [];
+      }
+    }
     const normalized = normalizeAdvice(review);
     // Prefer the advisor's own stable key: it survives rewording and a changed
     // severity, which is exactly when a chain matters. Text equality is only
@@ -2615,7 +2631,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const outcome = await runReview(primaryThreadId, focus, timeline, signal, false);
       if (outcome.kind === "unavailable" && outcome.reason === BLOCKED_REASON && !signal?.aborted) {
-        return runReview(primaryThreadId, focus, timeline, signal);
+        return runReview(primaryThreadId, focus, timeline, signal, true, true);
       }
       return outcome;
     })().finally(() => {
